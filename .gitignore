@@ -10,6 +10,10 @@ __pycache__/
 .env
 *.db
 test.db
+persona_studio.db*
+
+# Next.js generated
+next-env.d.ts
 
 # IDE
 .vscode/
