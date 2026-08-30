@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# Environment
+.env
+*.db
+test.db
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+.next/
+out/
+dist/
+build/
+
+# Legacy (pre-existing files from before this project)
+.freebuff/
+Gemma Local Agent.app/
+REPAIR - Install Gemma Local Agent v3.command

@@ -1,0 +1,117 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: persona
+      POSTGRES_PASSWORD: persona_secret
+      POSTGRES_DB: persona_studio
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U persona -d persona_studio"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: persona
+      MINIO_ROOT_PASSWORD: persona_secret
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://persona:persona_secret@postgres:5432/persona_studio
+      DATABASE_URL_SYNC: postgresql://persona:persona_secret@postgres:5432/persona_studio
+      REDIS_URL: redis://redis:6379/0
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: persona
+      MINIO_SECRET_KEY: persona_secret
+      MINIO_BUCKET: persona-studio
+      ENVIRONMENT: development
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    volumes:
+      - ./apps/api:/app
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    command: ["celery", "-A", "app.celery_app", "worker", "--loglevel=info", "--concurrency=4"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://persona:persona_secret@postgres:5432/persona_studio
+      DATABASE_URL_SYNC: postgresql://persona:persona_secret@postgres:5432/persona_studio
+      REDIS_URL: redis://redis:6379/0
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: persona
+      MINIO_SECRET_KEY: persona_secret
+      MINIO_BUCKET: persona-studio
+      ENVIRONMENT: development
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./apps/api:/app
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - ./apps/web/src:/app/src
+
+volumes:
+  pgdata:
+  miniodata:
