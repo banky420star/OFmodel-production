@@ -22,6 +22,9 @@ def utcnow():
 class PersonaStatus(str, enum.Enum):
     DRAFT = "draft"
     ACTIVE = "active"
+    BUILDING = "building"
+    READY = "ready"
+    FAILED = "failed"
     ARCHIVED = "archived"
 
 
@@ -382,3 +385,20 @@ class Forecast(Base):
     confidence_intervals = Column(JSON, default=dict)
     metadata_json = Column(JSON, default=dict)
     created_at = Column(DateTime(timezone=True), default=utcnow)
+
+
+class Job(Base):
+    """Background job with progress tracking for frontend polling."""
+    __tablename__ = "jobs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    type = Column(String(64), nullable=False)  # build_persona, generate_shoot, etc.
+    status = Column(String(32), default="queued")  # queued, running, completed, failed
+    progress = Column(Integer, default=0)  # 0-100
+    message = Column(Text, nullable=True)
+    persona_id = Column(UUID(as_uuid=True), ForeignKey("personas.id", ondelete="CASCADE"), nullable=True)
+    shoot_id = Column(UUID(as_uuid=True), ForeignKey("shoots.id", ondelete="SET NULL"), nullable=True)
+    pack_id = Column(UUID(as_uuid=True), ForeignKey("content_packs.id", ondelete="SET NULL"), nullable=True)
+    metadata_json = Column(JSON, default=dict)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)

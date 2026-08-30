@@ -5,9 +5,9 @@ from functools import lru_cache
 
 
 class Settings(BaseSettings):
-    # Database
-    DATABASE_URL: str = "postgresql+asyncpg://persona:persona_secret@localhost:5432/persona_studio"
-    DATABASE_URL_SYNC: str = "postgresql://persona:persona_secret@localhost:5432/persona_studio"
+    # Database — defaults to SQLite for local dev; set DATABASE_URL to postgres for production
+    DATABASE_URL: str = "sqlite+aiosqlite:///./persona_studio.db"
+    DATABASE_URL_SYNC: str = "sqlite:///./persona_studio.db"
 
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"

@@ -39,6 +39,7 @@ from app.workflows.content_flow import (
     quality_check_handler, assemble_pack_handler,
     generate_captions_handler, finalize_pack_handler,
 )
+from app.providers.registry import get_registry
 from app.providers.mocks import (
     MockLLMProvider, MockImageProvider, MockVideoProvider,
     MockVoiceProvider, MockTrainerProvider, MockStorageProvider,
@@ -77,22 +78,22 @@ async def health_check(db: AsyncSession = Depends(get_db)):
     except Exception as e:
         checks.append(HealthCheck(service="postgres", status="red", message=str(e)))
 
-    # Providers
-    for name, Provider in [
-        ("llm", MockLLMProvider),
-        ("image", MockImageProvider),
-        ("video", MockVideoProvider),
-        ("voice", MockVoiceProvider),
-        ("trainer", MockTrainerProvider),
-        ("storage", MockStorageProvider),
-    ]:
+    # Providers via registry
+    registry = get_registry()
+    providers = {
+        "llm": registry.get_llm_provider(),
+        "image": registry.get_image_provider(),
+        "video": registry.get_video_provider(),
+        "voice": registry.get_voice_provider(),
+        "trainer": registry.get_trainer_provider(),
+        "storage": registry.get_storage_provider(),
+    }
+    for name, provider in providers.items():
         try:
-            p = Provider()
-            result = await p.health_check()
-            checks.append(HealthCheck(
-                service=name,
-                status="green" if result.success else "yellow",
-            ))
+            result = await provider.health_check()
+            provider_name = result.provider if hasattr(result, 'provider') else type(provider).__name__
+            status = "green" if result.success else "yellow"
+            checks.append(HealthCheck(service=name, status=status, message=provider_name))
         except Exception as e:
             checks.append(HealthCheck(service=name, status="red", message=str(e)))
 
@@ -254,6 +255,51 @@ async def get_persona(persona_id: UUID, db: AsyncSession = Depends(get_db)):
         created_at=persona.created_at,
         updated_at=persona.updated_at,
     )
+
+
+@router.post("/personas/{persona_id}/build")
+async def build_persona(persona_id: UUID, db: AsyncSession = Depends(get_db)):
+    """Start a build job for a persona — enqueues to Redis for worker processing."""
+    from app.models import Job
+    from app.queue import enqueue
+
+    persona = await db.get(Persona, persona_id)
+    if not persona:
+        raise HTTPException(404, "Persona not found")
+
+    persona.status = PersonaStatus.BUILDING
+    job = Job(
+        id=uuid4(),
+        type="build_persona",
+        status="queued",
+        progress=0,
+        message="Queued",
+        persona_id=persona.id,
+    )
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+
+    # Enqueue to Redis for worker pickup
+    try:
+        await enqueue({
+            "job_id": str(job.id),
+            "type": job.type,
+            "persona_id": str(persona.id),
+        })
+    except Exception:
+        pass  # Redis may not be running in dev
+
+    return {
+        "id": str(job.id),
+        "type": job.type,
+        "status": job.status,
+        "progress": job.progress,
+        "message": job.message,
+        "persona_id": str(persona.id),
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+    }
 
 
 # ─── Identity (Phase 3) ───────────────────────────────────────────────
