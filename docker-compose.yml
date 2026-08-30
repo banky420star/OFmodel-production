@@ -5,16 +5,16 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: persona
-      POSTGRES_PASSWORD: persona_secret
-      POSTGRES_DB: persona_studio
+      POSTGRES_USER: ${POSTGRES_USER:-persona}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-persona_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-persona_studio}
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U persona -d persona_studio"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-persona} -d ${POSTGRES_DB:-persona_studio}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -35,8 +35,8 @@ services:
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: persona
-      MINIO_ROOT_PASSWORD: persona_secret
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-persona}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-persona_secret}
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -49,21 +49,22 @@ services:
       dockerfile: Dockerfile.api
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "${API_PORT:-8000}:8000"
     environment:
-      DATABASE_URL: postgresql+asyncpg://persona:persona_secret@postgres:5432/persona_studio
-      DATABASE_URL_SYNC: postgresql://persona:persona_secret@postgres:5432/persona_studio
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-persona}:${POSTGRES_PASSWORD:-persona_secret}@postgres:5432/${POSTGRES_DB:-persona_studio}
+      DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:-persona}:${POSTGRES_PASSWORD:-persona_secret}@postgres:5432/${POSTGRES_DB:-persona_studio}
       REDIS_URL: redis://redis:6379/0
       MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: persona
-      MINIO_SECRET_KEY: persona_secret
-      MINIO_BUCKET: persona-studio
-      ENVIRONMENT: development
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-persona}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-persona_secret}
+      MINIO_BUCKET: ${MINIO_BUCKET:-persona-studio}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
       PROVIDER_REGISTRY: ${PROVIDER_REGISTRY:-mock}
-      COMFYUI_URL: ${COMFYUI_URL:-http://localhost:8188}
-      WAN_VIDEO_URL: ${WAN_VIDEO_URL:-http://localhost:8080}
+      COMFYUI_URL: ${COMFYUI_URL:-}
+      WAN_VIDEO_URL: ${WAN_VIDEO_URL:-}
       ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
       GPU_WORKER_URL: ${GPU_WORKER_URL:-}
+      OLLAMA_URL: ${OLLAMA_URL:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -86,17 +87,17 @@ services:
     command: ["celery", "-A", "app.celery_app", "worker", "--loglevel=info", "--concurrency=4"]
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql+asyncpg://persona:persona_secret@postgres:5432/persona_studio
-      DATABASE_URL_SYNC: postgresql://persona:persona_secret@postgres:5432/persona_studio
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-persona}:${POSTGRES_PASSWORD:-persona_secret}@postgres:5432/${POSTGRES_DB:-persona_studio}
+      DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:-persona}:${POSTGRES_PASSWORD:-persona_secret}@postgres:5432/${POSTGRES_DB:-persona_studio}
       REDIS_URL: redis://redis:6379/0
       MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: persona
-      MINIO_SECRET_KEY: persona_secret
-      MINIO_BUCKET: persona-studio
-      ENVIRONMENT: development
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-persona}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-persona_secret}
+      MINIO_BUCKET: ${MINIO_BUCKET:-persona-studio}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
       PROVIDER_REGISTRY: ${PROVIDER_REGISTRY:-mock}
-      COMFYUI_URL: ${COMFYUI_URL:-http://localhost:8188}
-      WAN_VIDEO_URL: ${WAN_VIDEO_URL:-http://localhost:8080}
+      COMFYUI_URL: ${COMFYUI_URL:-}
+      WAN_VIDEO_URL: ${WAN_VIDEO_URL:-}
       ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
       GPU_WORKER_URL: ${GPU_WORKER_URL:-}
     depends_on:
@@ -113,9 +114,9 @@ services:
       dockerfile: Dockerfile.web
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "${WEB_PORT:-3000}:3000"
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     depends_on:
       api:
         condition: service_healthy
