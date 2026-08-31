@@ -112,16 +112,16 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.web
+      args:
+        API_INTERNAL_URL: http://api:8000
     restart: unless-stopped
     ports:
       - "${WEB_PORT:-3000}:3000"
     environment:
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      API_INTERNAL_URL: http://api:8000
     depends_on:
       api:
         condition: service_healthy
-    volumes:
-      - ./apps/web/src:/app/src
 
 volumes:
   pgdata:

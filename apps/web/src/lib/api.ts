@@ -1,4 +1,6 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001';
+// In production/Docker: use relative URLs — Next.js rewrite proxies /api/* to backend
+// For local dev outside Docker: set NEXT_PUBLIC_API_URL=http://localhost:8000
+const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
 async function apiFetch(path: string, options: RequestInit = {}) {
   const res = await fetch(`${API_URL}/api/v1${path}`, {

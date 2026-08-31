@@ -2,10 +2,13 @@
 const nextConfig = {
   output: 'standalone',
   async rewrites() {
+    // In Docker: http://api:8000 (service name)
+    // Local dev: http://localhost:8000
+    const apiUrl = process.env.API_INTERNAL_URL || 'http://localhost:8000';
     return [
       {
         source: '/api/:path*',
-        destination: `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/:path*`,
+        destination: `${apiUrl}/api/:path*`,
       },
     ];
   },

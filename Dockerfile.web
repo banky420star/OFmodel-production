@@ -8,8 +8,10 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY apps/web/ .
 
-# Set API URL for production
-ENV NEXT_PUBLIC_API_URL=http://localhost:8000
+# API URL: empty string for browser (uses rewrites), internal URL for server-side rewrites
+ARG API_INTERNAL_URL=http://localhost:8000
+ENV API_INTERNAL_URL=${API_INTERNAL_URL}
+ENV NEXT_PUBLIC_API_URL=
 ENV NODE_ENV=production
 
 RUN npm run build
