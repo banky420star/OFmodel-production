@@ -3,6 +3,7 @@
 The main application with all 14 phases implemented.
 """
 
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,9 +41,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+WEB_ORIGIN = os.getenv("WEB_ORIGIN", "http://localhost:3000")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        WEB_ORIGIN,
+        "http://localhost:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

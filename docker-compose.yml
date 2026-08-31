@@ -8,8 +8,6 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-persona}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-persona_secret}
       POSTGRES_DB: ${POSTGRES_DB:-persona_studio}
-    ports:
-      - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
@@ -22,8 +20,6 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    ports:
-      - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -37,9 +33,6 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-persona}
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-persona_secret}
-    ports:
-      - "9000:9000"
-      - "9001:9001"
     volumes:
       - miniodata:/data
 
@@ -65,6 +58,7 @@ services:
       ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
       GPU_WORKER_URL: ${GPU_WORKER_URL:-}
       OLLAMA_URL: ${OLLAMA_URL:-}
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:3000}
     depends_on:
       postgres:
         condition: service_healthy
@@ -113,12 +107,10 @@ services:
       context: .
       dockerfile: Dockerfile.web
       args:
-        API_INTERNAL_URL: http://api:8000
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     restart: unless-stopped
     ports:
       - "${WEB_PORT:-3000}:3000"
-    environment:
-      API_INTERNAL_URL: http://api:8000
     depends_on:
       api:
         condition: service_healthy
