@@ -65,6 +65,16 @@ class ProviderRegistry:
         return self._get("image", MockImageProvider)
 
     def get_video_provider(self) -> VideoProvider:
+        # DashScope cloud Wan (Alibaba Cloud) — highest priority if API key is set
+        if self._mode in ("hybrid", "wan", "wan_video", "dashscope", "wan_cloud"):
+            api_key = os.getenv("WAN_API_KEY", "") or os.getenv("DASHSCOPE_API_KEY", "")
+            if api_key:
+                try:
+                    from app.providers.wan_dashscope import DashScopeWanProvider
+                    return self._get("video", lambda: DashScopeWanProvider(api_key=api_key))
+                except ImportError:
+                    pass
+        # Self-hosted Wan server
         if self._mode in ("hybrid", "wan", "wan_video"):
             try:
                 from app.providers.wan_video import WanVideoProvider
