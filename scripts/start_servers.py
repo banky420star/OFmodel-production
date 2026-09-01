@@ -38,10 +38,13 @@ else:
 # Start Next.js frontend
 web_dir = os.path.join(os.path.dirname(__file__), "..", "apps", "web")
 web_log = open("/tmp/persona_web.log", "w")
+web_env = os.environ.copy()
+web_env["NEXT_PUBLIC_API_URL"] = ""
+web_env["API_INTERNAL_URL"] = "http://localhost:8001"
 web_proc = subprocess.Popen(
     ["npx", "next", "dev", "-p", "3000"],
     cwd=web_dir, stdout=web_log, stderr=subprocess.STDOUT,
-    start_new_session=True
+    start_new_session=True, env=web_env
 )
 print(f"Next.js started: PID={web_proc.pid}")
 
