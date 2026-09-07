@@ -14,10 +14,12 @@ from pydantic import BaseModel
 from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+DB_PATH = Path(__file__).parent.parent.parent / "persona_studio.db"
+
 from app.database import get_db
 from app.models import (
     Persona, Shoot, ContentPack, GeneratedVideo, GeneratedVoice,
-    ShootStatus, ContentPackStatus,
+    ShootStatus, ContentPackStatus, Identity,
 )
 from app.schemas import (
     ShootCreate, ShootResponse, ContentPackCreate, ContentPackResponse,
@@ -48,9 +50,23 @@ async def list_shoots(
 
 
 @router.get("/shoots/{shoot_id}/images")
-async def get_shoot_images(shoot_id: UUID, db: AsyncSession = Depends(get_db)):
+async def get_shoot_images(shoot_id: str, db: AsyncSession = Depends(get_db)):
     """Get all images for a shoot with URLs."""
-    shoot = await db.get(Shoot, shoot_id)
+    # Try full UUID first, then short hex lookup
+    shoot = None
+    try:
+        shoot = await db.get(Shoot, shoot_id)
+    except Exception:
+        pass
+    if not shoot:
+        # Short hex — search by text prefix
+        import sqlite3 as _sqlite3
+        conn = _sqlite3.connect(str(DB_PATH))
+        row = conn.execute("SELECT id FROM shoots WHERE id LIKE ?", (f"{shoot_id}%",)).fetchone()
+        conn.close()
+        if row:
+            from uuid import UUID
+            shoot = await db.get(Shoot, UUID(row[0]))
     if not shoot:
         raise HTTPException(404, "Shoot not found")
 
@@ -624,7 +640,7 @@ async def _run_auto_produce(
         # Generate images for this shoot
         for i, scene in enumerate(theme_data["scenes"][:images_per_shoot]):
             full_prompt = f"{identity_desc}. {scene}"
-            output_dir = _Path(__file__).parent.parent / "storage" / "shoots" / shoot_id.hex[:8]
+            output_dir = _Path(__file__).parent.parent.parent / "storage" / "shoots" / shoot_id.hex[:8]
             output_dir.mkdir(parents=True, exist_ok=True)
             output_path = str(output_dir / f"shot_{i+1:02d}.png")
             
@@ -637,7 +653,9 @@ async def _run_auto_produce(
                     seed_override=hash(f"{shoot_id.hex}_{i}") % 2147483647,
                 )
                 if result["success"]:
-                    shoot_images.append(output_path)
+                    # Store as relative path for the image serving endpoint
+                    rel = f"storage/shoots/{shoot_id.hex[:8]}/shot_{i+1:02d}.png"
+                    shoot_images.append(rel)
             except Exception as e:
                 logger.error(f"Image generation failed: {e}")
             

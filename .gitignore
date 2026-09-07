@@ -39,3 +39,4 @@ apps/api/persona_studio.db
 .freebuff/
 Gemma Local Agent.app/
 REPAIR - Install Gemma Local Agent v3.command
+apps/api/app/storage/
