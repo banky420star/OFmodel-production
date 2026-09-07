@@ -1,6 +1,7 @@
 """Persona Studio — Complete API routes for all 14 phases."""
 
 from __future__ import annotations
+import json
 import time
 import random
 from pathlib import Path
@@ -1691,6 +1692,346 @@ async def health_check():
         "ok": all_green,
         "status": "healthy" if all_green else "degraded",
         "providers": health,
+    }
+
+
+# ─── Fan Chat (Revenue Layer) ────────────────────────────────────────
+
+@router.get("/fans")
+async def list_fans(
+    persona_id: str | None = None,
+    status: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """List fans with spending and engagement data."""
+    from app.models import Fan
+    q = select(Fan).order_by(Fan.total_spent.desc())
+    if persona_id:
+        q = q.where(Fan.persona_id == persona_id)
+    if status:
+        q = q.where(Fan.status == status)
+    result = await db.execute(q)
+    fans = result.scalars().all()
+    return [
+        {
+            "id": str(f.id),
+            "persona_id": str(f.persona_id),
+            "username": f.username,
+            "display_name": f.display_name,
+            "platform": f.platform,
+            "status": f.status,
+            "subscription_tier": f.subscription_tier,
+            "total_spent": f.total_spent,
+            "ppv_purchases": f.ppv_purchases,
+            "tips_given": f.tips_given,
+            "messages_sent": f.messages_sent,
+            "messages_received": f.messages_received,
+            "fan_score": f.fan_score,
+            "tags": f.tags,
+            "last_active": f.last_active.isoformat() if f.last_active else None,
+            "last_message_at": f.last_message_at.isoformat() if f.last_message_at else None,
+            "created_at": f.created_at.isoformat() if f.created_at else None,
+        }
+        for f in fans
+    ]
+
+
+@router.post("/fans")
+async def create_fan(
+    persona_id: str = Query(...),
+    username: str = Query(...),
+    display_name: str = Query(""),
+    platform: str = Query("onlyfans"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Register a new fan."""
+    from app.models import Fan
+    fan = Fan(
+        persona_id=UUID(persona_id),
+        username=username,
+        display_name=display_name or username,
+        platform=platform,
+    )
+    db.add(fan)
+    await db.commit()
+    await db.refresh(fan)
+    return {"id": str(fan.id), "username": fan.username, "status": "created"}
+
+
+@router.get("/fans/{fan_id}/messages")
+async def list_fan_messages(
+    fan_id: str,
+    limit: int = 50,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get chat history for a fan."""
+    from app.models import ChatMessage, Fan
+    fan_uuid = UUID(fan_id)
+    fan = await db.get(Fan, fan_uuid)
+    if not fan:
+        raise HTTPException(404, "Fan not found")
+    
+    q = (
+        select(ChatMessage)
+        .where(ChatMessage.fan_id == fan_uuid)
+        .order_by(ChatMessage.created_at.desc())
+        .limit(limit)
+    )
+    result = await db.execute(q)
+    messages = result.scalars().all()
+    messages.reverse()  # oldest first
+    
+    return [
+        {
+            "id": str(m.id),
+            "direction": m.direction,
+            "content": m.content,
+            "message_type": m.message_type,
+            "is_ai_generated": m.is_ai_generated,
+            "is_ppv": m.is_ppv,
+            "ppv_price": m.ppv_price,
+            "sentiment": m.sentiment,
+            "intent": m.intent,
+            "created_at": m.created_at.isoformat() if m.created_at else None,
+        }
+        for m in messages
+    ]
+
+
+@router.post("/fans/{fan_id}/reply")
+async def auto_reply(
+    fan_id: str,
+    message: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate and send an AI reply to a fan message."""
+    from app.models import Fan, ChatMessage
+    from app.chat_engine import generate_chat_reply
+    
+    fan = await db.get(Fan, UUID(fan_id))
+    if not fan:
+        raise HTTPException(404, "Fan not found")
+    
+    persona = await db.get(Persona, fan.persona_id)
+    if not persona:
+        raise HTTPException(404, "Persona not found")
+    
+    # Save inbound message
+    inbound = ChatMessage(
+        fan_id=fan.id,
+        persona_id=fan.persona_id,
+        direction="inbound",
+        content=message,
+        message_type="text",
+    )
+    db.add(inbound)
+    fan.messages_sent = (fan.messages_sent or 0) + 1
+    fan.last_message_at = datetime.now(timezone.utc)
+    
+    # Get conversation history
+    history_q = (
+        select(ChatMessage)
+        .where(ChatMessage.fan_id == fan.id)
+        .order_by(ChatMessage.created_at.desc())
+        .limit(10)
+    )
+    history_result = await db.execute(history_q)
+    history = [
+        {"direction": m.direction, "content": m.content}
+        for m in history_result.scalars().all()
+    ]
+    history.reverse()
+    
+    # Calculate days since last active
+    days_since = 0
+    if fan.last_active:
+        days_since = (datetime.now(timezone.utc) - fan.last_active).days
+    
+    # Generate AI reply
+    reply = await generate_chat_reply(
+        persona_name=persona.name,
+        brand=persona.brand or "lifestyle",
+        personality=json.dumps(persona.personality) if persona.personality else "friendly, flirty",
+        voice_style=persona.voice_style or "casual English",
+        fan_message=message,
+        conversation_history=history,
+        fan_total_spent=fan.total_spent or 0,
+        fan_ppv_purchases=fan.ppv_purchases or 0,
+        fan_messages_sent=fan.messages_sent or 0,
+        days_since_last_active=days_since,
+    )
+    
+    # Save outbound message
+    outbound = ChatMessage(
+        fan_id=fan.id,
+        persona_id=fan.persona_id,
+        direction="outbound",
+        content=reply.text,
+        message_type="text",
+        is_ai_generated=True,
+        sentiment=reply.sentiment,
+        intent=reply.intent,
+    )
+    db.add(outbound)
+    fan.messages_received = (fan.messages_received or 0) + 1
+    
+    # Update fan score
+    from app.chat_engine import _score_fan
+    fan.fan_score = _score_fan(
+        fan.total_spent or 0,
+        fan.ppv_purchases or 0,
+        fan.messages_sent or 0,
+        days_since,
+    )
+    
+    await db.commit()
+    
+    return {
+        "reply": reply.text,
+        "intent": reply.intent,
+        "sentiment": reply.sentiment,
+        "suggests_ppv": reply.suggests_ppv,
+        "ppv_prompt": reply.ppv_prompt,
+        "fan_score": fan.fan_score,
+    }
+
+
+@router.post("/fans/{fan_id}/ppv")
+async def send_ppv(
+    fan_id: str,
+    content_key: str = Query(...),
+    price: float = Query(...),
+    caption: str = Query(""),
+    db: AsyncSession = Depends(get_db),
+):
+    """Send a PPV message to a fan."""
+    from app.models import Fan, ChatMessage
+    
+    fan = await db.get(Fan, UUID(fan_id))
+    if not fan:
+        raise HTTPException(404, "Fan not found")
+    
+    ppv_msg = ChatMessage(
+        fan_id=fan.id,
+        persona_id=fan.persona_id,
+        direction="outbound",
+        content=caption or "exclusive content 🔒",
+        message_type="ppv",
+        is_ppv=True,
+        ppv_price=price,
+        metadata_json={"content_key": content_key},
+    )
+    db.add(ppv_msg)
+    await db.commit()
+    
+    return {"status": "sent", "ppv_price": price, "fan": fan.username}
+
+
+@router.post("/fans/mass-message")
+async def mass_message(
+    persona_id: str = Query(...),
+    message_type: str = Query("welcome"),
+    fan_ids: list[str] | None = Query(None),
+    custom_message: str = Query(""),
+    db: AsyncSession = Depends(get_db),
+):
+    """Send a mass message to multiple fans."""
+    from app.models import Fan, ChatMessage
+    from app.chat_engine import generate_mass_message
+    
+    persona = await db.get(Persona, persona_id)
+    if not persona:
+        raise HTTPException(404, "Persona not found")
+    
+    # Get target fans
+    if fan_ids:
+        q = select(Fan).where(Fan.id.in_(fan_ids))
+    else:
+        q = select(Fan).where(Fan.persona_id == persona_id).where(Fan.status == "active")
+    
+    result = await db.execute(q)
+    fans = result.scalars().all()
+    
+    sent = 0
+    for fan in fans:
+        msg_text = await generate_mass_message(
+            persona_name=persona.name,
+            brand=persona.brand or "lifestyle",
+            personality=json.dumps(persona.personality) if persona.personality else "friendly",
+            voice_style=persona.voice_style or "casual",
+            message_type=message_type,
+            fan_name=fan.display_name or fan.username,
+            custom_context=custom_message,
+        )
+        
+        msg = ChatMessage(
+            fan_id=fan.id,
+            persona_id=persona_id,
+            direction="outbound",
+            content=msg_text,
+            message_type="text",
+            is_ai_generated=True,
+        )
+        db.add(msg)
+        sent += 1
+    
+    await db.commit()
+    return {"sent": sent, "message_type": message_type}
+
+
+@router.get("/fans/analytics")
+async def fan_analytics(
+    persona_id: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Aggregate fan metrics for the dashboard."""
+    from app.models import Fan, ChatMessage
+    from sqlalchemy import func
+    
+    q = select(Fan)
+    if persona_id:
+        q = q.where(Fan.persona_id == persona_id)
+    result = await db.execute(q)
+    fans = result.scalars().all()
+    
+    if not fans:
+        return {
+            "total_fans": 0,
+            "total_revenue": 0,
+            "avg_fan_score": 0,
+            "whales": 0,
+            "at_risk": 0,
+            "new_this_week": 0,
+            "top_fans": [],
+        }
+    
+    total_spent = sum(f.total_spent or 0 for f in fans)
+    avg_score = sum(f.fan_score or 0 for f in fans) / len(fans)
+    whales = len([f for f in fans if (f.total_spent or 0) > 100])
+    at_risk = len([f for f in fans if f.status == "inactive"])
+    
+    week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+    new_this_week = len([f for f in fans if f.created_at and f.created_at > week_ago])
+    
+    # Top 10 fans by spending
+    sorted_fans = sorted(fans, key=lambda f: f.total_spent or 0, reverse=True)[:10]
+    
+    return {
+        "total_fans": len(fans),
+        "total_revenue": round(total_spent, 2),
+        "avg_fan_score": round(avg_score, 1),
+        "whales": whales,
+        "at_risk": at_risk,
+        "new_this_week": new_this_week,
+        "top_fans": [
+            {
+                "username": f.username,
+                "total_spent": f.total_spent,
+                "fan_score": f.fan_score,
+                "status": f.status,
+            }
+            for f in sorted_fans
+        ],
     }
 
 

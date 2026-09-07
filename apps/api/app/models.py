@@ -100,6 +100,7 @@ class Persona(Base):
     identities = relationship("Identity", back_populates="persona", cascade="all, delete-orphan")
     shoots = relationship("Shoot", back_populates="persona", cascade="all, delete-orphan")
     content_packs = relationship("ContentPack", back_populates="persona", cascade="all, delete-orphan")
+    fans = relationship("Fan", back_populates="persona", cascade="all, delete-orphan")
 
 
 # ─── Identity (Phase 3) ───────────────────────────────────────────────
@@ -340,17 +341,26 @@ class QAResult(Base):
 
 class ScheduledPost(Base):
     __tablename__ = "scheduled_posts"
+    __table_args__ = {"extend_existing": True}
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     persona_id = Column(UUID(as_uuid=True), ForeignKey("personas.id", ondelete="CASCADE"), nullable=False)
     content_pack_id = Column(UUID(as_uuid=True), ForeignKey("content_packs.id", ondelete="SET NULL"))
-    platform = Column(String(64), nullable=False)
+    platform = Column(String(64), nullable=False)  # onlyfans, instagram, tiktok, fanvue, fansly
+    content_type = Column(String(32), default="image")  # image, video, text, ppv, bundle
+    title = Column(String(256), default="")
+    caption = Column(Text, default="")
+    media_keys = Column(JSON, default=list)  # list of file keys
+    ppv_price = Column(Float, nullable=True)  # null = free post
+    tags = Column(JSON, default=list)
     scheduled_at = Column(DateTime(timezone=True), nullable=False)
     posted_at = Column(DateTime(timezone=True), nullable=True)
-    status = Column(String(32), default="scheduled")  # scheduled, posted, failed
+    status = Column(String(32), default="scheduled")  # draft, scheduled, posted, failed
     post_url = Column(String(512), default="")
     engagement_data = Column(JSON, default=dict)
+    metadata_json = Column(JSON, default=dict)
     created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
 # ─── Analytics (Phase 11) ─────────────────────────────────────────────
@@ -410,3 +420,56 @@ class Job(Base):
     metadata_json = Column(JSON, default=dict)
     created_at = Column(DateTime(timezone=True), default=utcnow)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+# ─── Fan Chat (Revenue Layer) ─────────────────────────────────────────
+
+class Fan(Base):
+    """A fan/subscriber on the creator's platform."""
+    __tablename__ = "fans"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    persona_id = Column(UUID(as_uuid=True), ForeignKey("personas.id", ondelete="CASCADE"), nullable=False)
+    username = Column(String(128), nullable=False)
+    display_name = Column(String(256), default="")
+    platform = Column(String(32), default="onlyfans")  # onlyfans, fanvue, fansly, custom
+    status = Column(String(32), default="active")  # active, inactive, banned, vip
+    subscription_tier = Column(String(64), default="free")  # free, standard, premium, vip
+    total_spent = Column(Float, default=0.0)
+    ppv_purchases = Column(Integer, default=0)
+    tips_given = Column(Float, default=0.0)
+    messages_sent = Column(Integer, default=0)
+    messages_received = Column(Integer, default=0)
+    last_active = Column(DateTime(timezone=True), nullable=True)
+    last_message_at = Column(DateTime(timezone=True), nullable=True)
+    fan_score = Column(Float, default=0.0)  # 0-100, predicted spend potential
+    tags = Column(JSON, default=list)  # ["whale", "new", "at_risk", "engaged"]
+    notes = Column(Text, default="")  # operator notes
+    metadata_json = Column(JSON, default=dict)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    persona = relationship("Persona", back_populates="fans")
+    messages = relationship("ChatMessage", back_populates="fan", cascade="all, delete-orphan")
+
+
+class ChatMessage(Base):
+    """A message in the fan chat system."""
+    __tablename__ = "chat_messages"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    fan_id = Column(UUID(as_uuid=True), ForeignKey("fans.id", ondelete="CASCADE"), nullable=False)
+    persona_id = Column(UUID(as_uuid=True), ForeignKey("personas.id", ondelete="CASCADE"), nullable=False)
+    direction = Column(String(16), nullable=False)  # inbound (fan→model), outbound (model→fan)
+    content = Column(Text, nullable=False)
+    message_type = Column(String(32), default="text")  # text, image, video, ppv, tip, system
+    is_ai_generated = Column(Boolean, default=False)
+    is_ppv = Column(Boolean, default=False)
+    ppv_price = Column(Float, default=0.0)
+    ppv_unlocked = Column(Boolean, default=False)
+    sentiment = Column(Float, nullable=True)  # -1 to 1, AI-analyzed
+    intent = Column(String(64), nullable=True)  # greeting, question, flirt, purchase, complaint, custom_request
+    metadata_json = Column(JSON, default=dict)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+
+    fan = relationship("Fan", back_populates="messages")

@@ -124,3 +124,54 @@ export const autoProduce = (personaId: string, params?: {
 
 // Health
 export const getHealth = () => apiFetch('/health');
+
+// Fan Chat
+export const listFans = (params?: { persona_id?: string; status?: string }) => {
+  const qs = new URLSearchParams();
+  if (params?.persona_id) qs.set('persona_id', params.persona_id);
+  if (params?.status) qs.set('status', params.status);
+  const q = qs.toString();
+  return apiFetch(`/fans${q ? '?' + q : ''}`);
+};
+
+export const createFan = (personaId: string, username: string, displayName?: string) =>
+  apiFetch('/fans', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      persona_id: personaId, username, display_name: displayName || username,
+    }),
+  });
+
+export const listFanMessages = (fanId: string, limit = 50) =>
+  apiFetch(`/fans/${fanId}/messages?limit=${limit}`);
+
+export const autoReply = (fanId: string, message: string) =>
+  apiFetch(`/fans/${fanId}/reply`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ message }),
+  });
+
+export const sendPPV = (fanId: string, contentKey: string, price: number, caption?: string) =>
+  apiFetch(`/fans/${fanId}/ppv`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      content_key: contentKey, price: String(price), caption: caption || '',
+    }),
+  });
+
+export const massMessage = (personaId: string, messageType: string, fanIds?: string[]) =>
+  apiFetch('/fans/mass-message', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      persona_id: personaId, message_type: messageType, fan_ids: fanIds,
+    }),
+  });
+
+export const getFanAnalytics = (personaId?: string) => {
+  const qs = personaId ? `?persona_id=${personaId}` : '';
+  return apiFetch(`/fans/analytics${qs}`);
+};
