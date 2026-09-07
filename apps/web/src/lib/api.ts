@@ -238,3 +238,13 @@ export const activateSocialAccount = (accountId: string) =>
 
 export const listPersonaSocialAccounts = (personaId: string) =>
   apiFetch(`/personas/${personaId}/social-accounts`);
+
+export const generateAccountEmail = (accountId: string) =>
+  apiFetch(`/social-accounts/${accountId}/generate-email`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(),
+  });
+
+export const checkAccountEmails = (accountId: string) =>
+  apiFetch(`/social-accounts/${accountId}/emails`);

@@ -2447,6 +2447,80 @@ async def list_persona_social_accounts(
     ]
 
 
+@router.post("/social-accounts/{account_id}/generate-email")
+async def generate_account_email(
+    account_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate a temporary email address for a social account using mail.tm."""
+    from app.models import SocialAccount
+    from app.providers.email import create_temp_email
+
+    account = await db.get(SocialAccount, account_id)
+    if not account:
+        raise HTTPException(404, "Account not found")
+
+    persona = await db.get(Persona, account.persona_id)
+    if not persona:
+        raise HTTPException(404, "Persona not found")
+
+    try:
+        email_result = await create_temp_email(
+            persona_name=persona.name,
+            prefix=account.platform,
+        )
+    except Exception as e:
+        raise HTTPException(502, f"Failed to create email: {e}")
+
+    # Store email info in the account
+    account.email = email_result.address
+    account.metadata_json = {
+        **(account.metadata_json or {}),
+        "email_account_id": email_result.account_id,
+        "email_password": email_result.password,
+        "email_token": email_result.token,
+        "email_domain": email_result.domain,
+    }
+    await db.commit()
+
+    return {
+        "email": email_result.address,
+        "domain": email_result.domain,
+        "status": "created",
+        "message": f"Email {email_result.address} created. Use this to sign up on {account.platform}.",
+    }
+
+
+@router.get("/social-accounts/{account_id}/emails")
+async def check_account_emails(
+    account_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Check for verification emails received at the account's temp email."""
+    from app.models import SocialAccount
+    from app.providers.email import fetch_emails
+
+    account = await db.get(SocialAccount, account_id)
+    if not account:
+        raise HTTPException(404, "Account not found")
+
+    meta = account.metadata_json or {}
+    token = meta.get("email_token", "")
+    if not token:
+        raise HTTPException(400, "No email account generated yet. Call generate-email first.")
+
+    try:
+        emails = await fetch_emails(token)
+    except Exception as e:
+        raise HTTPException(502, f"Failed to fetch emails: {e}")
+
+    return {
+        "email": account.email,
+        "count": len(emails),
+        "emails": emails,
+    }
+
+
 @router.get("/system/health")
 async def system_health():
     """Detailed system health including provider status."""

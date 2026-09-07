@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import {
   listSocialAccounts, requestSocialAccount, approveSocialAccount,
   rejectSocialAccount, activateSocialAccount, listPersonas,
+  generateAccountEmail, checkAccountEmails,
 } from '@/lib/api'
 
 interface SocialAccount {
@@ -405,8 +406,59 @@ export default function SocialsPage() {
                     {account.status.replace('_', ' ')}
                   </span>
 
+                  {/* Email badge */}
+                  {account.email && (
+                    <div style={{
+                      padding: '3px 8px', borderRadius: 4, fontSize: 11,
+                      background: 'rgba(99,102,241,0.1)', color: '#818CF8',
+                      fontFamily: 'monospace', flexShrink: 0,
+                    }}>
+                      ✉ {account.email}
+                    </div>
+                  )}
+
                   {/* Actions */}
                   <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                    {!account.email && account.status !== 'rejected' && (
+                      <button
+                        onClick={async () => {
+                          setActionLoading(account.id)
+                          try {
+                            await generateAccountEmail(account.id)
+                            refresh()
+                          } catch (e: any) { alert(e.message) }
+                          setActionLoading(null)
+                        }}
+                        disabled={actionLoading === account.id}
+                        style={{
+                          padding: '6px 12px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                          background: 'rgba(99,102,241,0.12)', color: '#818CF8', border: 'none',
+                        }}
+                      >
+                        {actionLoading === account.id ? '...' : 'Get Email'}
+                      </button>
+                    )}
+                    {account.email && (
+                      <button
+                        onClick={async () => {
+                          setActionLoading(account.id)
+                          try {
+                            const result: any = await checkAccountEmails(account.id)
+                            alert(result.count > 0
+                              ? `${result.count} email(s) received:\n${result.emails.map((e: any) => `From: ${e.from?.address || 'unknown'}\nSubject: ${e.subject}\n${e.intro || ''}`).join('\n---\n')}`
+                              : 'No emails received yet. Check again after signing up on the platform.')
+                          } catch (e: any) { alert(e.message) }
+                          setActionLoading(null)
+                        }}
+                        disabled={actionLoading === account.id}
+                        style={{
+                          padding: '6px 12px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                          background: 'rgba(99,102,241,0.12)', color: '#818CF8', border: 'none',
+                        }}
+                      >
+                        Check Inbox
+                      </button>
+                    )}
                     {account.status === 'pending_approval' && (
                       <>
                         <button
