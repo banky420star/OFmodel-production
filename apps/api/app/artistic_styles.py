@@ -992,6 +992,141 @@ VIDEO_MOTION_STYLES = [
     ),
 ]
 
+# ─── LOUNGEWEAR ──────────────────────────────────────────────────
+
+LOUNGEWEAR_STYLES = [
+    ArtisticStyle(
+        name="Morning Coffee",
+        category="loungewear",
+        image_prompt="cozy morning scene, soft oversized pajama set in pastel tones, holding a steaming mug of coffee by a sunlit window, messy bun hair, minimal makeup, warm golden hour light streaming through sheer curtains, relaxed natural pose, intimate lifestyle photography",
+        video_prompt="slow sip of coffee, steam rising from mug, gentle stretch, morning sunlight shifting across the room, natural relaxed movement",
+        lighting="warm golden hour window light, soft diffused",
+        mood="cozy, intimate, peaceful morning",
+    ),
+    ArtisticStyle(
+        name="Bed Selfie",
+        category="loungewear",
+        image_prompt="lying in white sheets wearing a satin camisole and shorts set, phone propped on pillow, soft morning light, tousled hair, relaxed smile, luxurious bedding, intimate personal photo aesthetic, natural skin texture",
+        video_prompt="gentle roll in the sheets, reaching for phone, playful smile, morning light moving across the bed, soft natural movement",
+        lighting="soft diffused morning light, white bedding reflection",
+        mood="playful, relaxed, personal",
+    ),
+    ArtisticStyle(
+        name="Cozy Reading",
+        category="loungewear",
+        image_prompt="curled up on a velvet armchair in an oversized knit sweater and leggings, reading a book, warm throw blanket, soft fairy lights in background, cozy evening atmosphere, natural intimate photography",
+        video_prompt="turning a page, adjusting the blanket, settling deeper into the chair, soft ambient light flickering, relaxed natural motion",
+        lighting="warm ambient fairy lights, soft lamp glow",
+        mood="serene, intellectual, cozy",
+    ),
+    ArtisticStyle(
+        name="Mirror Selfie Loungewear",
+        category="loungewear",
+        image_prompt="full body mirror selfie in matching ribbed loungewear set, standing in a minimalist bedroom, natural daylight, casual confident pose, phone in hand, clean modern interior, authentic personal style photo",
+        video_prompt="adjusting the outfit in the mirror, turning slightly to show different angles, confident casual movement, natural daylight shifting",
+        lighting="natural daylight from bedroom window",
+        mood="confident, casual, authentic",
+    ),
+    ArtisticStyle(
+        name="Lazy Sunday",
+        category="loungewear",
+        image_prompt="lounging on a plush sofa in a soft robe and slippers, legs tucked under a blanket, watching something off-screen, bowl of snacks nearby, Sunday morning vibe, oversized comfortable clothes, natural relaxed atmosphere",
+        video_prompt="reaching for snacks, pulling blanket closer, settling into the couch, lazy comfortable movement, relaxed breathing",
+        lighting="soft diffused living room light, TV glow",
+        mood="lazy, comfortable, carefree",
+    ),
+]
+
+# ─── GRWM (GET READY WITH ME) ──────────────────────────────────────
+
+GRWM_STYLES = [
+    ArtisticStyle(
+        name="Skincare Routine",
+        category="grwm",
+        image_prompt="close-up at a vanity mirror, applying serum to cheeks with fingertips, minimal makeup, hair pulled back with headband, clean skin glowing, beauty products arranged on counter, soft ring light reflection in eyes, beauty tutorial aesthetic",
+        video_prompt="gently patting serum into skin, massaging in upward strokes, skin glistening, focused expression, beauty routine movement",
+        lighting="soft vanity ring light, even flattering illumination",
+        mood="focused, dewy, fresh",
+    ),
+    ArtisticStyle(
+        name="Hair Styling",
+        category="grwm",
+        image_prompt="standing at a bathroom mirror, running fingers through damp hair, hair dryer or straightener nearby, towel around shoulders, getting-ready-in-progress look, steamy bathroom atmosphere, natural candid photography",
+        video_prompt="running fingers through hair, styling with tools, hair falling into place, steam drifting, getting-ready energy",
+        lighting="bright bathroom lighting, mirror reflections",
+        mood="energetic, transformative, candid",
+    ),
+    ArtisticStyle(
+        name="Makeup Application",
+        category="grwm",
+        image_prompt="seated at a well-lit vanity, applying mascara with focused expression, makeup brushes and palettes spread out, half-done face showing transformation, close-up beauty shot, professional lighting setup",
+        video_prompt="carefully applying eyeliner, blending eyeshadow, checking the mirror, makeup transformation in progress",
+        lighting="professional vanity lighting, soft and even",
+        mood="artistic, meticulous, glamorous",
+    ),
+    ArtisticStyle(
+        name="Closet Selection",
+        category="grwm",
+        image_prompt="standing in front of an open wardrobe, holding up two outfit options against her body, deciding between them, clothes hanging neatly, fashion choices laid out on bed, natural indecisive expression, lifestyle photography",
+        video_prompt="comparing outfits, holding up different pieces, turning to check the mirror, decisive moment of choice, natural movement",
+        lighting="bright walk-in closet lighting, natural tones",
+        mood="indecisive, excited, fashion-forward",
+    ),
+    ArtisticStyle(
+        name="Final Look Reveal",
+        category="grwm",
+        image_prompt="confident full-body shot in the completed outfit, standing in a stylish entryway, hand on hip, polished hair and makeup, ready to go out, mirror showing the full look, transformation complete, editorial-quality self-portrait",
+        video_prompt="confident spin to show the full outfit, adjusting the final detail, walking toward the door, transformation reveal moment",
+        lighting="natural light from doorway, golden accents",
+        mood="confident, polished, ready",
+    ),
+]
+
+# ─── CASUAL ───────────────────────────────────────────────────────
+
+CASUAL_STYLES = [
+    ArtisticStyle(
+        name="Kitchen Cooking",
+        category="casual",
+        image_prompt="in a modern kitchen, wearing a casual t-shirt and shorts, chopping vegetables at the counter, steam rising from a pot, natural domestic scene, warm kitchen lighting, authentic home-cooking moment, lifestyle photography",
+        video_prompt="stirring the pot, chopping vegetables, tasting the food, steam rising, natural kitchen movement, domestic warmth",
+        lighting="warm kitchen pendant light, natural window light",
+        mood="domestic, warm, authentic",
+    ),
+    ArtisticStyle(
+        name="Couch Lounging",
+        category="casual",
+        image_prompt="sprawled on a deep sectional couch, wearing comfortable clothes, scrolling on phone, throw pillows around, afternoon light through blinds, completely relaxed at-home pose, natural unposed photography",
+        video_prompt="shifting position on the couch, laughing at phone, pulling a pillow close, lazy afternoon energy, natural movement",
+        lighting="afternoon light through blinds, soft shadows",
+        mood="relaxed, unhurried, genuine",
+    ),
+    ArtisticStyle(
+        name="Balcony Moment",
+        category="casual",
+        image_prompt="standing on a balcony, leaning on the railing, looking out at the view, wearing a casual sundress, wind in hair, cityscape or garden background, golden hour light, peaceful contemplative moment, natural lifestyle photography",
+        video_prompt="wind gently blowing hair and dress, looking out at the view, taking a deep breath, golden hour light shifting, serene movement",
+        lighting="golden hour backlight, warm natural tones",
+        mood="peaceful, contemplative, free",
+    ),
+    ArtisticStyle(
+        name="Home Workout",
+        category="casual",
+        image_prompt="in a living room cleared for exercise, wearing sports bra and leggings, mid-stretch or yoga pose, exercise mat on floor, water bottle nearby, natural fitness at-home moment, energetic casual photography",
+        video_prompt="flowing through yoga poses, stretching, breathing deeply, natural athletic movement, home workout energy",
+        lighting="bright natural room light, energetic atmosphere",
+        mood="energetic, motivated, natural",
+    ),
+    ArtisticStyle(
+        name="Evening Wind-Down",
+        category="casual",
+        image_prompt="in a dimly lit bedroom, wearing comfortable pajamas, lighting a candle on the nightstand, phone charging nearby, warm lamp light, peaceful evening routine, winding down for sleep, intimate natural photography",
+        video_prompt="lighting the candle, settling into bed, turning off the lamp, peaceful breathing, evening wind-down routine",
+        lighting="warm dim lamp light, candle glow, intimate ambiance",
+        mood="calm, peaceful, intimate",
+    ),
+]
+
 # ─── ALL STYLES COMBINED ──────────────────────────────────────────
 
 ALL_STYLES: list[ArtisticStyle] = (
@@ -1003,6 +1138,9 @@ ALL_STYLES: list[ArtisticStyle] = (
     + CINEMATIC_STYLES
     + NATURISTA_STYLES
     + VIDEO_MOTION_STYLES
+    + LOUNGEWEAR_STYLES
+    + GRWM_STYLES
+    + CASUAL_STYLES
 )
 
 # Category index for quick lookup
@@ -1015,6 +1153,9 @@ STYLE_CATEGORIES: dict[str, list[ArtisticStyle]] = {
     "cinematic": CINEMATIC_STYLES,
     "naturista": NATURISTA_STYLES,
     "video": VIDEO_MOTION_STYLES,
+    "loungewear": LOUNGEWEAR_STYLES,
+    "grwm": GRWM_STYLES,
+    "casual": CASUAL_STYLES,
 }
 
 

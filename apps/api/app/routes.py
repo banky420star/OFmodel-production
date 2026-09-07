@@ -1473,6 +1473,9 @@ async def _run_auto_produce(
         "cinematic": lambda: _build_theme("Cinematic", "cinematic", 5),
         "conceptual": lambda: _build_theme("Conceptual", "conceptual", 5),
         "naturista": lambda: _build_theme("Naturista", "naturista", 5),
+        "loungewear": lambda: _build_theme("Loungewear", "loungewear", 5),
+        "grwm": lambda: _build_theme("GRWM", "grwm", 5),
+        "casual": lambda: _build_theme("Casual", "casual", 5),
     }
     
     # Select themes based on parameter or default

@@ -26,6 +26,9 @@ const THEMES = [
   { key: 'editorial', label: 'Editorial', icon: '📸' },
   { key: 'artistic', label: 'Artistic', icon: '🎨' },
   { key: 'travel', label: 'Travel', icon: '✈️' },
+  { key: 'loungewear', label: 'Loungewear', icon: '🩱' },
+  { key: 'grwm', label: 'GRWM', icon: '💄' },
+  { key: 'casual', label: 'Casual', icon: '🛋️' },
   { key: 'nude', label: 'Artistic Nude', icon: '🖼️' },
 ]
 
