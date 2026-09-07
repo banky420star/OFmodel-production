@@ -56,6 +56,10 @@ export const generateForecast = (personaId: string) =>
 export const getSchedule = (personaId: string) => apiFetch(`/personas/${personaId}/schedule`);
 export const generateSchedule = (personaId: string) =>
   apiFetch(`/personas/${personaId}/schedule/generate`, { method: 'POST' });
+export const smartSchedule = (personaId: string) =>
+  apiFetch(`/personas/${personaId}/schedule/smart`, { method: 'POST' });
+export const smartScheduleAll = () =>
+  apiFetch('/schedule/smart-all', { method: 'POST' });
 
 // Autopilot
 export const toggleAutopilot = (personaId: string, mode: string) =>

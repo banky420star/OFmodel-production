@@ -282,10 +282,14 @@ class ForecastResponse(BaseModel):
 # ─── Scheduled Post ────────────────────────────────────────────────────
 
 class ScheduledPostResponse(BaseModel):
-    id: UUID
-    persona_id: UUID
-    content_pack_id: UUID | None
+    id: str
+    persona_id: str
+    content_pack_id: str | None
     platform: str
+    content_type: str = "image"
+    title: str = ""
+    caption: str = ""
+    media_keys: list | dict = []
     scheduled_at: datetime
     posted_at: datetime | None
     status: str

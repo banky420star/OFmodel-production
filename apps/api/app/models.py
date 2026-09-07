@@ -343,9 +343,9 @@ class ScheduledPost(Base):
     __tablename__ = "scheduled_posts"
     __table_args__ = {"extend_existing": True}
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    persona_id = Column(UUID(as_uuid=True), ForeignKey("personas.id", ondelete="CASCADE"), nullable=False)
-    content_pack_id = Column(UUID(as_uuid=True), ForeignKey("content_packs.id", ondelete="SET NULL"))
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    persona_id = Column(String(36), ForeignKey("personas.id", ondelete="CASCADE"), nullable=False)
+    content_pack_id = Column(String(36), ForeignKey("content_packs.id", ondelete="SET NULL"))
     platform = Column(String(64), nullable=False)  # onlyfans, instagram, tiktok, fanvue, fansly
     content_type = Column(String(32), default="image")  # image, video, text, ppv, bundle
     title = Column(String(256), default="")
