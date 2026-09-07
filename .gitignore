@@ -29,6 +29,12 @@ out/
 dist/
 build/
 
+# Generated assets
+apps/api/storage/
+apps/api/data/
+apps/api/persona_studio.db
+
+
 # Legacy (pre-existing files from before this project)
 .freebuff/
 Gemma Local Agent.app/

@@ -1,5 +1,6 @@
 """Persona Studio API — Settings & Configuration."""
 
+from pathlib import Path
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 
@@ -27,12 +28,28 @@ class Settings(BaseSettings):
     # Provider configuration
     PROVIDER_REGISTRY: str = "mock"  # mock | comfyui | elevenlabs | wan | ollama
 
+    # External API keys
+    ELEVENLABS_API_KEY: str = ""
+    WAN_API_KEY: str = ""
+    WAN_VIDEO_URL: str = ""
+    OLLAMA_URL: str = "http://localhost:11434"
+    OLLAMA_MODEL: str = ""
+    COMFYUI_URL: str = ""
+    DASHSCOPE_API_KEY: str = ""
+    HUGGINGFACE_API_KEY: str = ""
+    HF_IMAGE_MODEL: str = "black-forest-labs/FLUX.1-schnell"
+    HF_IMG2IMG_MODEL: str = "stabilityai/stable-diffusion-xl-refiner-1.0"
+
+    # Instagram Graph API
+    INSTAGRAM_ACCESS_TOKEN: str = ""
+    INSTAGRAM_ACCOUNT_ID: str = ""  # The Instagram Business Account ID (numeric)
+
     # Workflow engine
     MAX_CONCURRENT_WORKFLOWS: int = 10
     WORKFLOW_STEP_TIMEOUT_SECONDS: int = 300
 
     class Config:
-        env_file = ".env"
+        env_file = str(Path(__file__).resolve().parent.parent.parent.parent / ".env")
 
 
 @lru_cache

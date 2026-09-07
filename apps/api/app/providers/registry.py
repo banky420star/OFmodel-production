@@ -9,6 +9,8 @@ Environment variables:
   ELEVENLABS_API_KEY = sk_...
   WAN_VIDEO_URL = http://localhost:8080
   OLLAMA_URL = http://localhost:11434
+  INSTAGRAM_ACCESS_TOKEN = EAAG...
+  INSTAGRAM_ACCOUNT_ID = 17841400123456789
 """
 
 from __future__ import annotations
@@ -35,8 +37,10 @@ class ProviderRegistry:
     """
 
     def __init__(self, mode: str = ""):
-        import os
-        self._mode = mode or os.getenv("PROVIDER_REGISTRY", "mock")
+        from app.config import get_settings
+        settings = get_settings()
+        self._mode = mode or settings.PROVIDER_REGISTRY
+        self._settings = settings
         self._instances: dict[str, object] = {}
 
     def _get(self, key: str, factory):
@@ -48,17 +52,38 @@ class ProviderRegistry:
         if self._mode in ("hybrid", "ollama", "openai"):
             try:
                 from app.providers.ollama_provider import OllamaLLMProvider
-                return self._get("llm", OllamaLLMProvider)
+                return self._get("llm", lambda: OllamaLLMProvider(
+                    base_url=self._settings.OLLAMA_URL,
+                    model=self._settings.OLLAMA_MODEL or "qwen3:8b",
+                ))
             except ImportError:
                 pass
         return self._get("llm", MockLLMProvider)
 
     def get_image_provider(self) -> ImageProvider:
-        if self._mode in ("hybrid", "comfyui"):
+        # Priority 1: ComfyUI (local GPU) — only if URL is explicitly set
+        if self._mode in ("hybrid", "comfyui") and self._settings.COMFYUI_URL:
             try:
                 from app.providers.comfyui import ComfyUIImageProvider
                 return self._get("image", lambda: ComfyUIImageProvider(
-                    base_url=os.getenv("COMFYUI_URL", "http://localhost:8188")
+                    base_url=self._settings.COMFYUI_URL
+                ))
+            except ImportError:
+                pass
+        # Priority 2: DashScope Qwen-Image (same key as Wan video, up to 2048px)
+        api_key = self._settings.WAN_API_KEY or getattr(self._settings, "DASHSCOPE_API_KEY", "")
+        if api_key:
+            try:
+                from app.providers.dashscope_image import DashScopeImageProvider
+                return self._get("image", lambda: DashScopeImageProvider(api_key=api_key))
+            except ImportError:
+                pass
+        # Priority 3: HuggingFace Inference API (free, no GPU needed)
+        if self._mode in ("hybrid", "huggingface", "hf"):
+            try:
+                from app.providers.huggingface import HuggingFaceImageProvider
+                return self._get("image", lambda: HuggingFaceImageProvider(
+                    api_key=getattr(self._settings, "HUGGINGFACE_API_KEY", ""),
                 ))
             except ImportError:
                 pass
@@ -67,7 +92,7 @@ class ProviderRegistry:
     def get_video_provider(self) -> VideoProvider:
         # DashScope cloud Wan (Alibaba Cloud) — highest priority if API key is set
         if self._mode in ("hybrid", "wan", "wan_video", "dashscope", "wan_cloud"):
-            api_key = os.getenv("WAN_API_KEY", "") or os.getenv("DASHSCOPE_API_KEY", "")
+            api_key = self._settings.WAN_API_KEY or self._settings.DASHSCOPE_API_KEY
             if api_key:
                 try:
                     from app.providers.wan_dashscope import DashScopeWanProvider
@@ -79,7 +104,7 @@ class ProviderRegistry:
             try:
                 from app.providers.wan_video import WanVideoProvider
                 return self._get("video", lambda: WanVideoProvider(
-                    base_url=os.getenv("WAN_VIDEO_URL", "http://localhost:8080")
+                    base_url=self._settings.WAN_VIDEO_URL or "http://localhost:8080"
                 ))
             except ImportError:
                 pass
@@ -90,48 +115,92 @@ class ProviderRegistry:
             try:
                 from app.providers.elevenlabs import ElevenLabsVoiceProvider
                 return self._get("voice", lambda: ElevenLabsVoiceProvider(
-                    api_key=os.getenv("ELEVENLABS_API_KEY", "")
+                    api_key=self._settings.ELEVENLABS_API_KEY
                 ))
             except ImportError:
                 pass
         return self._get("voice", MockVoiceProvider)
 
     def get_trainer_provider(self) -> TrainerProvider:
-        # Real trainer requires GPU worker — always mock for now
+        # HuggingFace LoRA trainer (runs on MPS/CUDA)
+        try:
+            from app.providers.hf_trainer import HuggingFaceTrainer
+            return self._get("trainer", HuggingFaceTrainer)
+        except ImportError:
+            pass
         return self._get("trainer", MockTrainerProvider)
 
     def get_storage_provider(self) -> StorageProvider:
-        # MinIO storage when available, otherwise in-memory mock
+        # MinIO storage when available
         if self._mode in ("hybrid", "minio"):
             try:
                 from app.storage import MinIOStorageProvider
                 return self._get("storage", MinIOStorageProvider)
             except (ImportError, Exception):
                 pass
+        # Local filesystem storage (hard drive)
+        try:
+            from app.providers.filesystem_storage import FileSystemStorageProvider
+            return self._get("storage", FileSystemStorageProvider)
+        except (ImportError, Exception):
+            pass
         return self._get("storage", MockStorageProvider)
 
+    def get_instagram_provider(self):
+        """Get Instagram analytics provider (returns None if not configured)."""
+        token = self._settings.INSTAGRAM_ACCESS_TOKEN
+        account_id = self._settings.INSTAGRAM_ACCOUNT_ID
+        if not token or not account_id:
+            return None
+        try:
+            from app.providers.instagram import InstagramProvider
+            return InstagramProvider(
+                access_token=token,
+                instagram_account_id=account_id,
+            )
+        except ImportError:
+            return None
+
     def health_report(self) -> dict[str, dict]:
-        """Get health status of all configured providers."""
-        providers = {
-            "llm": self.get_llm_provider(),
-            "image": self.get_image_provider(),
-            "video": self.get_video_provider(),
-            "voice": self.get_voice_provider(),
-            "trainer": self.get_trainer_provider(),
-            "storage": self.get_storage_provider(),
+        """Get health status of all configured providers.
+
+        Reports based on configuration, not live connectivity pings.
+        This avoids blocking the API on slow provider health checks.
+        """
+        providers_config = {
+            "llm": (self.get_llm_provider, self._settings.OLLAMA_URL),
+            "image": (self.get_image_provider, self._settings.HUGGINGFACE_API_KEY or self._settings.COMFYUI_URL),
+            "video": (self.get_video_provider, self._settings.WAN_API_KEY or self._settings.DASHSCOPE_API_KEY),
+            "voice": (self.get_voice_provider, self._settings.ELEVENLABS_API_KEY),
+            "trainer": (self.get_trainer_provider, "configured"),
+            "storage": (self.get_storage_provider, "./storage/"),
         }
-        import asyncio
         report = {}
-        for name, provider in providers.items():
-            try:
-                result = asyncio.get_event_loop().run_until_complete(provider.health_check())
-                report[name] = {
-                    "status": "green" if result.success else "yellow",
-                    "provider": result.provider,
-                    "details": result.data,
-                }
-            except Exception as e:
-                report[name] = {"status": "red", "error": str(e)}
+        for name, (getter, config_value) in providers_config.items():
+            instance = getter()
+            is_mock = "mock" in type(instance).__name__.lower()
+            provider_name = getattr(instance, "_provider", type(instance).__name__).replace("mock_", "")
+            report[name] = {
+                "status": "green" if not is_mock or name in ("storage",) else "yellow",
+                "provider": provider_name,
+                "details": "Configured" if config_value else "Using defaults",
+            }
+
+        # Instagram — optional
+        ig = self.get_instagram_provider()
+        if ig:
+            report["instagram"] = {
+                "status": "green",
+                "provider": "instagram_graph_api",
+                "details": f"Account {self._settings.INSTAGRAM_ACCOUNT_ID[:8]}...",
+            }
+        else:
+            report["instagram"] = {
+                "status": "yellow",
+                "provider": "instagram_graph_api",
+                "details": "Not configured",
+            }
+
         return report
 
 

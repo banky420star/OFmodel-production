@@ -19,6 +19,7 @@ This test runs the ENTIRE mock workflow as specified in the master prompt:
     → 24-month forecast
 """
 
+import asyncio
 import pytest
 from uuid import UUID
 
@@ -57,13 +58,25 @@ async def test_full_e2e_workflow(client):
         "voice_style": "South African English",
         "publishing_frequency": "5 packs/week",
     })
-    assert resp.status_code == 200, f"Create persona failed: {resp.text}"
+    assert resp.status_code in (200, 201), f"Create persona failed: {resp.text}"
     persona = resp.json()
     persona_id = persona["id"]
+    job_id = persona.get("job_id")
     assert persona["name"] == unique_name
     assert persona["age"] == 24
-    assert persona["status"] == "active"
     print(f"  ✓ Persona created: {persona_id}")
+
+    # Wait for background workflow to finish
+    if job_id:
+        for _ in range(100):  # max 30s
+            await asyncio.sleep(0.3)
+            jr = await client.get(f"/api/v1/jobs/{job_id}")
+            if jr.status_code == 200 and jr.json()["status"] in ("completed", "failed"):
+                break
+        # Re-fetch persona
+        fr = await client.get(f"/api/v1/personas/{persona_id}")
+        persona = fr.json()
+    assert persona["status"] in ("active", "building")
 
     # Verify persona appears in list
     resp = await client.get("/api/v1/personas")

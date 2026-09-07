@@ -153,8 +153,11 @@ class WorkflowEngine:
             await db.refresh(step)
             return step
 
-    async def run_workflow(self, workflow_id: UUID) -> Workflow:
-        """Execute all steps of a workflow in sequence."""
+    async def run_workflow(self, workflow_id: UUID, job_id: UUID | None = None) -> Workflow:
+        """Execute all steps of a workflow in sequence.
+        
+        If job_id is provided, updates the Job record with progress after each step.
+        """
         workflow = await self.start_workflow(workflow_id)
 
         async with self._session_factory() as db:
@@ -165,21 +168,41 @@ class WorkflowEngine:
             )
             steps = result.scalars().all()
 
+        total_steps = len(steps)
         context: dict[str, Any] = {"workflow_id": str(workflow_id), **(workflow.input_data or {})}
         failed = False
 
-        for step in steps:
+        for i, step in enumerate(steps):
             if step.status == WorkflowStepStatus.COMPLETED:
-                # Carry forward output from previous steps
                 context[f"step_{step.order}_output"] = step.output_data
                 continue
+
+            # Update job progress before each step
+            if job_id:
+                await self._update_job_progress(
+                    job_id, progress=int((i / total_steps) * 100),
+                    message=f"Step {i+1}/{total_steps}: {step.name}"
+                )
 
             logger.info("executing_step", step_id=str(step.id), name=step.name, order=step.order)
             updated_step = await self.execute_step(workflow_id, step.id, context=context)
             context[f"step_{step.order}_output"] = updated_step.output_data or {}
 
+            # Update progress after each step completes
+            if job_id:
+                await self._update_job_progress(
+                    job_id,
+                    progress=int(((i + 1) / total_steps) * 100),
+                    message=f"Step {i+1}/{total_steps}: {step.name} ✓",
+                )
+
             if updated_step.status == WorkflowStepStatus.FAILED:
                 failed = True
+                if job_id:
+                    await self._update_job_progress(
+                        job_id, progress=int(((i + 1) / total_steps) * 100),
+                        message=f"Failed at: {step.name}", status="failed"
+                    )
                 break
 
         # Update workflow status
@@ -191,7 +214,6 @@ class WorkflowEngine:
             else:
                 workflow.status = WorkflowStatus.COMPLETED
                 workflow.completed_at = _utcnow()
-                # Collect all step outputs
                 outputs = {}
                 for key, val in context.items():
                     if key.startswith("step_"):
@@ -200,12 +222,35 @@ class WorkflowEngine:
             await db.commit()
             await db.refresh(workflow)
 
+        # Final job update
+        if job_id:
+            final_status = "completed" if not failed else "failed"
+            final_msg = "Build complete" if not failed else "Build failed"
+            await self._update_job_progress(
+                job_id, progress=100 if not failed else int(((i+1) / total_steps) * 100),
+                message=final_msg, status=final_status
+            )
+
         logger.info(
             "workflow_finished",
             workflow_id=str(workflow_id),
             status=workflow.status.value,
         )
         return workflow
+
+    async def _update_job_progress(self, job_id: UUID, progress: int, message: str, status: str = "running"):
+        """Update a Job record with current progress."""
+        from app.models import Job
+        try:
+            async with self._session_factory() as db:
+                job = await db.get(Job, job_id)
+                if job:
+                    job.progress = min(progress, 100)
+                    job.message = message
+                    job.status = status
+                    await db.commit()
+        except Exception as e:
+            logger.error("job_update_failed", job_id=str(job_id), error=str(e))
 
     async def retry_workflow(self, workflow_id: UUID) -> Workflow:
         """Retry a failed workflow from the failed step."""

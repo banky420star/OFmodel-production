@@ -4,330 +4,358 @@ import { useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import {
   getPersona, listIdentities, listShoots, listPacks, listWorkflows,
-  listQA, getAnalytics, getForecasts, getSchedule,
-  createShoot, generateShoot, createPack, assemblePack,
+  getAnalytics, getForecasts, getSchedule, getGallery,
+  createShoot, createPack,
   generateAnalytics, generateForecast, generateSchedule,
   toggleAutopilot,
 } from '@/lib/api'
+import { GRADIENTS } from '@/lib/constants'
+import { Icons } from '@/lib/icons'
+import { StatusBadge } from '@/components/ui/StatusBadge'
 
-type Tab = 'overview' | 'identity' | 'shoots' | 'content' | 'analytics' | 'revenue' | 'schedule' | 'workflows'
+type Tab = 'overview' | 'identity' | 'shoots' | 'content' | 'analytics' | 'revenue' | 'schedule' | 'workflows' | 'gallery'
 
+const TABS: { key: Tab; label: string }[] = [
+  { key: 'overview', label: 'Overview' },
+  { key: 'gallery', label: 'Gallery' },
+  { key: 'identity', label: 'Identity' },
+  { key: 'shoots', label: 'Shoots' },
+  { key: 'content', label: 'Content' },
+  { key: 'analytics', label: 'Analytics' },
+  { key: 'revenue', label: 'Revenue' },
+  { key: 'schedule', label: 'Calendar' },
+  { key: 'workflows', label: 'Workflows' },
+]
+
+/* ── Lazy tab wrapper ─────────────────────────────────── */
+function useTabData<T>(id: string, fetcher: () => Promise<T>, deps: unknown[]) {
+  const [data, setData] = useState<T | null>(null)
+  const [loading, setLoading] = useState(true)
+  useEffect(() => {
+    let cancelled = false
+    fetcher().then(d => { if (!cancelled) { setData(d); setLoading(false) } })
+      .catch(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, deps) // eslint-disable-line react-hooks/exhaustive-deps
+  return { data, loading, setData }
+}
+
+/* ── Tab panels ───────────────────────────────────────── */
+
+function OverviewTab({ persona }: { persona: any }) {
+  const items = [
+    { label: 'Status', value: persona.status },
+    { label: 'Identity', value: persona.identity_score ? `${(persona.identity_score * 100).toFixed(1)}%` : 'N/A' },
+    { label: 'Content Packs', value: persona.packs_count },
+    { label: 'Voice', value: persona.identity_status === 'ready' ? 'READY' : 'PENDING' },
+  ]
+  return (
+    <div className="grid-4">
+      {items.map(item => (
+        <div key={item.label} className="panel panel-sm">
+          <div className="field-label">{item.label}</div>
+          <div className="stat-value">{item.value}</div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function GalleryTab({ id }: { id: string }) {
+  const { data: gallery, loading } = useTabData(id, () => getGallery(id), [id])
+  const [selected, setSelected] = useState<string | null>(null)
+
+  if (loading) return <p className="muted-md">Loading gallery…</p>
+  if (!gallery?.images?.length) return <p className="muted-md">No images yet.</p>
+
+  return (
+    <div>
+      <h3 className="section-title">Gallery ({gallery.count} images)</h3>
+      {selected && (
+        <div className="gallery-lightbox" onClick={() => setSelected(null)}>
+          <img src={selected} alt="Full size" style={{ maxWidth: '90vw', maxHeight: '85vh', borderRadius: 8 }} />
+        </div>
+      )}
+      <div className="gallery-grid">
+        {gallery.images.map((img: any, i: number) => (
+          <button
+            key={i}
+            className="gallery-thumb"
+            onClick={() => setSelected(img.url)}
+          >
+            <img src={img.url} alt={img.label} />
+            <span className="gallery-label">{img.label}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function IdentityTab({ id }: { id: string }) {
+  const { data: identities, loading } = useTabData(id, () => listIdentities(id), [id])
+  if (loading) return <p className="muted-md">Loading…</p>
+  return (
+    <div>
+      <h3 className="section-title">Identities ({identities?.length || 0})</h3>
+      {identities?.map((i: any) => (
+        <div key={i.id} className="panel list-row">
+          <span className="field-value">{i.name}</span>
+          <StatusBadge status={i.status} />
+        </div>
+      ))}
+      {identities?.length === 0 && <p className="muted-md">No identities yet.</p>}
+    </div>
+  )
+}
+
+function ShootsTab({ id }: { id: string }) {
+  const { data: shoots, loading, setData } = useTabData(id, () => listShoots(id), [id])
+  const [busy, setBusy] = useState(false)
+  const handleCreate = async () => {
+    setBusy(true)
+    try {
+      const shoot = await createShoot(id, { name: 'New Shoot', theme: 'lifestyle', image_count: 8 })
+      setData(prev => prev ? [shoot, ...prev] : [shoot])
+    } finally { setBusy(false) }
+  }
+  if (loading) return <p className="muted-md">Loading…</p>
+  return (
+    <div>
+      <div className="section-header">
+        <h3 className="section-title">Shoots ({shoots?.length || 0})</h3>
+        <button onClick={handleCreate} disabled={busy} className="primary-button btn-sm">
+          {busy ? 'Creating…' : '+ Create Shoot'}
+        </button>
+      </div>
+      {shoots?.map((s: any) => (
+        <div key={s.id} className="panel list-row">
+          <span className="field-value">{s.name || s.theme}</span>
+          <StatusBadge status={s.status} />
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function ContentTab({ id, personaName }: { id: string; personaName: string }) {
+  const { data: packs, loading, setData } = useTabData(id, () => listPacks(id), [id])
+  const [busy, setBusy] = useState(false)
+  const handleCreate = async () => {
+    setBusy(true)
+    try {
+      const pack = await createPack(id, { name: `${personaName} Pack`, platform: 'instagram' })
+      setData(prev => prev ? [pack, ...prev] : [pack])
+    } finally { setBusy(false) }
+  }
+  if (loading) return <p className="muted-md">Loading…</p>
+  return (
+    <div>
+      <div className="section-header">
+        <h3 className="section-title">Content Packs ({packs?.length || 0})</h3>
+        <button onClick={handleCreate} disabled={busy} className="primary-button btn-sm">
+          {busy ? 'Generating…' : '+ Generate Pack'}
+        </button>
+      </div>
+      {packs?.map((p: any) => (
+        <div key={p.id} className="panel list-row">
+          <div>
+            <div className="field-value">{p.name}</div>
+            <div className="muted-sm">Platform: {p.platform}</div>
+          </div>
+          <StatusBadge status={p.status} />
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function AnalyticsTab({ id }: { id: string }) {
+  const { data: analytics, loading, setData } = useTabData(id, () => getAnalytics(id), [id])
+  const [busy, setBusy] = useState(false)
+  const handleGenerate = async () => {
+    setBusy(true)
+    try { await generateAnalytics(id); const a = await getAnalytics(id); setData(a) }
+    finally { setBusy(false) }
+  }
+  if (loading) return <p className="muted-md">Loading…</p>
+  return (
+    <div>
+      <div className="section-header">
+        <h3 className="section-title">Analytics ({analytics?.length || 0} days)</h3>
+        <button onClick={handleGenerate} disabled={busy} className="primary-button btn-sm">
+          {busy ? 'Generating…' : 'Generate'}
+        </button>
+      </div>
+      {analytics && analytics.length > 0 && (
+        <div className="grid-4" style={{ marginBottom: 16 }}>
+          {[
+            { label: 'Followers', value: analytics[0]?.followers?.toLocaleString() || '—' },
+            { label: 'Engagement', value: analytics[0] ? `${(analytics[0].engagement_rate * 100).toFixed(1)}%` : '—' },
+            { label: 'Revenue', value: `$${analytics[0]?.revenue?.toLocaleString() || 0}` },
+            { label: 'Costs', value: `$${analytics[0]?.costs?.toLocaleString() || 0}` },
+          ].map(item => (
+            <div key={item.label} className="panel">
+              <div className="muted-sm">{item.label}</div>
+              <div className="stat-value">{item.value}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function RevenueTab({ id }: { id: string }) {
+  const { data: forecasts, loading, setData } = useTabData(id, () => getForecasts(id), [id])
+  const [busy, setBusy] = useState(false)
+  const handleGenerate = async () => {
+    setBusy(true)
+    try { await generateForecast(id); const f = await getForecasts(id); setData(f) }
+    finally { setBusy(false) }
+  }
+  if (loading) return <p className="muted-md">Loading…</p>
+  return (
+    <div>
+      <div className="section-header">
+        <h3 className="section-title">24-Month Forecast</h3>
+        <button onClick={handleGenerate} disabled={busy} className="primary-button btn-sm">
+          {busy ? 'Generating…' : 'Generate'}
+        </button>
+      </div>
+      {forecasts && forecasts.length > 0 && forecasts[0]?.scenarios?.map((s: any) => (
+        <div key={s.scenario} className="panel" style={{ padding: 12, marginBottom: 8 }}>
+          <div className="forecast-row">
+            <span className="forecast-scenario">{s.scenario}</span>
+            <span className="forecast-total">
+              Total: ${s.monthly_revenue?.reduce((a: number, b: number) => a + b, 0).toLocaleString() || 0}
+            </span>
+          </div>
+          <div className="progress-bar">
+            <div className="progress-bar-fill" style={{ width: `${Math.min(100, (s.monthly_revenue?.[23] || 0) / 500)}%` }} />
+          </div>
+        </div>
+      ))}
+      {forecasts?.length === 0 && <p className="muted-md">Generate a forecast to see projections.</p>}
+    </div>
+  )
+}
+
+function ScheduleTab({ id }: { id: string }) {
+  const { data: schedule, loading, setData } = useTabData(id, () => getSchedule(id), [id])
+  const [busy, setBusy] = useState(false)
+  const handleGenerate = async () => {
+    setBusy(true)
+    try { await generateSchedule(id); const sc = await getSchedule(id); setData(sc) }
+    finally { setBusy(false) }
+  }
+  if (loading) return <p className="muted-md">Loading…</p>
+  return (
+    <div>
+      <div className="section-header">
+        <h3 className="section-title">Calendar ({schedule?.length || 0} posts)</h3>
+        <button onClick={handleGenerate} disabled={busy} className="primary-button btn-sm">
+          {busy ? 'Scheduling…' : 'Auto-Schedule'}
+        </button>
+      </div>
+      {schedule?.map((s: any) => (
+        <div key={s.id} className="panel list-row-compact">
+          <span>{s.platform}</span>
+          <span className="muted-sm">{new Date(s.scheduled_at).toLocaleDateString()}</span>
+          <StatusBadge status={s.status} />
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function WorkflowsTab({ id }: { id: string }) {
+  const { data: workflows, loading } = useTabData(id, () => listWorkflows({ persona_id: id }), [id])
+  if (loading) return <p className="muted-md">Loading…</p>
+  return (
+    <div>
+      <h3 className="section-title">Workflows ({workflows?.length || 0})</h3>
+      {workflows?.map((w: any) => (
+        <div key={w.id} className="panel list-row">
+          <div>
+            <div className="field-value">{w.name}</div>
+            <div className="muted-sm">{w.workflow_type}</div>
+          </div>
+          <StatusBadge status={w.status} />
+        </div>
+      ))}
+      {workflows?.length === 0 && <p className="muted-md">No workflows yet.</p>}
+    </div>
+  )
+}
+
+/* ── Main Persona Page ────────────────────────────────── */
 export default function PersonaPage() {
   const params = useParams()
   const id = params.id as string
   const [tab, setTab] = useState<Tab>('overview')
   const [persona, setPersona] = useState<any>(null)
-  const [identities, setIdentities] = useState<any[]>([])
-  const [shoots, setShoots] = useState<any[]>([])
-  const [packs, setPacks] = useState<any[]>([])
-  const [workflows, setWorkflows] = useState<any[]>([])
-  const [qaResults, setQaResults] = useState<any[]>([])
-  const [analytics, setAnalytics] = useState<any[]>([])
-  const [forecasts, setForecasts] = useState<any[]>([])
-  const [schedule, setSchedule] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     if (!id) return
-    Promise.all([
-      getPersona(id).catch(() => null),
-      listIdentities(id).catch(() => []),
-      listShoots(id).catch(() => []),
-      listPacks(id).catch(() => []),
-      listWorkflows({ persona_id: id }).catch(() => []),
-      listQA(id).catch(() => []),
-      getAnalytics(id).catch(() => []),
-      getForecasts(id).catch(() => []),
-      getSchedule(id).catch(() => []),
-    ]).then(([p, i, s, pk, wf, qa, a, f, sc]) => {
-      setPersona(p)
-      setIdentities(i)
-      setShoots(s)
-      setPacks(pk)
-      setWorkflows(wf)
-      setQaResults(qa)
-      setAnalytics(a)
-      setForecasts(f)
-      setSchedule(sc)
-      setLoading(false)
-    })
+    getPersona(id).then(p => { setPersona(p); setLoading(false) })
+      .catch(() => setLoading(false))
   }, [id])
 
-  if (loading) return <div className="max-w-7xl mx-auto px-4 py-8 text-gray-400">Loading...</div>
-  if (!persona) return <div className="max-w-7xl mx-auto px-4 py-8 text-gray-400">Persona not found</div>
+  if (loading) return <main className="workspace"><div className="content muted-md">Loading…</div></main>
+  if (!persona) return <main className="workspace"><div className="content muted-md">Persona not found</div></main>
 
-  const tabs: { key: Tab; label: string }[] = [
-    { key: 'overview', label: 'Overview' },
-    { key: 'identity', label: 'Identity' },
-    { key: 'shoots', label: 'Shoots' },
-    { key: 'content', label: 'Content' },
-    { key: 'analytics', label: 'Analytics' },
-    { key: 'revenue', label: 'Revenue' },
-    { key: 'schedule', label: 'Calendar' },
-    { key: 'workflows', label: 'Workflows' },
-  ]
-
-  const handleCreateShoot = async () => {
-    const shoot = await createShoot(id, { name: 'New Shoot', theme: 'lifestyle', image_count: 8 })
-    setShoots(prev => [shoot, ...prev])
-    await generateShoot(shoot.id)
-  }
-
-  const handleCreatePack = async () => {
-    const pack = await createPack(id, { name: `${persona.name} Pack`, platform: 'instagram' })
-    setPacks(prev => [pack, ...prev])
-    await assemblePack(pack.id)
-  }
-
-  const handleGenerateAnalytics = async () => {
-    await generateAnalytics(id)
-    const a = await getAnalytics(id)
-    setAnalytics(a)
-  }
-
-  const handleGenerateForecast = async () => {
-    await generateForecast(id)
-    const f = await getForecasts(id)
-    setForecasts(f)
-  }
-
-  const handleGenerateSchedule = async () => {
-    await generateSchedule(id)
-    const sc = await getSchedule(id)
-    setSchedule(sc)
+  const tabContent = {
+    overview: <OverviewTab persona={persona} />,
+    gallery: <GalleryTab id={id} />,
+    identity: <IdentityTab id={id} />,
+    shoots: <ShootsTab id={id} />,
+    content: <ContentTab id={id} personaName={persona.name} />,
+    analytics: <AnalyticsTab id={id} />,
+    revenue: <RevenueTab id={id} />,
+    schedule: <ScheduleTab id={id} />,
+    workflows: <WorkflowsTab id={id} />,
   }
 
   return (
-    <div className="max-w-7xl mx-auto px-4 py-8">
-      {/* Header */}
-      <div className="flex items-center gap-4 mb-8">
-        <a href="/" className="text-gray-400 hover:text-white">← Back</a>
-        <div className="w-12 h-12 rounded-full bg-gradient-to-br from-purple-400 to-pink-400 flex items-center justify-center text-xl font-bold">
-          {persona.name[0]}
+    <main className="workspace">
+      <header className="topbar">
+        <div className="crumb">
+          <a href="/"><span>Persona Studio</span></a><b>/</b>
+          <span>{persona.name}</span>
         </div>
-        <div>
-          <h1 className="text-2xl font-bold">{persona.name}</h1>
-          <p className="text-sm text-gray-400">Age {persona.age} · {persona.brand} · {persona.status}</p>
-        </div>
-        <div className="ml-auto flex gap-2">
-          <button onClick={() => toggleAutopilot(id, 'on')} className="bg-green-600 hover:bg-green-700 px-3 py-1.5 rounded text-sm">
-            🤖 Autopilot ON
-          </button>
-        </div>
-      </div>
-
-      {/* Tabs */}
-      <div className="flex gap-1 mb-6 overflow-x-auto">
-        {tabs.map(t => (
-          <button
-            key={t.key}
-            onClick={() => setTab(t.key)}
-            className={`px-4 py-2 rounded-lg text-sm whitespace-nowrap transition ${
-              tab === t.key ? 'bg-purple-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
-
-      {/* Tab Content */}
-      <div className="bg-gray-900 rounded-xl p-6">
-        {tab === 'overview' && (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <div className="bg-gray-800 rounded-lg p-4">
-              <div className="text-xs text-gray-400 uppercase">Status</div>
-              <div className="text-lg font-bold capitalize">{persona.status}</div>
-            </div>
-            <div className="bg-gray-800 rounded-lg p-4">
-              <div className="text-xs text-gray-400 uppercase">Identity</div>
-              <div className="text-lg font-bold">{persona.identity_score ? `${(persona.identity_score * 100).toFixed(1)}%` : 'N/A'}</div>
-            </div>
-            <div className="bg-gray-800 rounded-lg p-4">
-              <div className="text-xs text-gray-400 uppercase">Content Packs</div>
-              <div className="text-lg font-bold">{persona.packs_count}</div>
-            </div>
-            <div className="bg-gray-800 rounded-lg p-4">
-              <div className="text-xs text-gray-400 uppercase">Voice</div>
-              <div className="text-lg font-bold">{persona.identity_status === 'ready' ? 'READY' : 'PENDING'}</div>
-            </div>
-          </div>
-        )}
-
-        {tab === 'identity' && (
-          <div>
-            <h3 className="text-lg font-semibold mb-4">Identities ({identities.length})</h3>
-            {identities.map(i => (
-              <div key={i.id} className="bg-gray-800 rounded-lg p-4 mb-3">
-                <div className="flex items-center justify-between">
-                  <span className="font-medium">{i.name}</span>
-                  <span className={`px-2 py-0.5 rounded text-xs ${
-                    i.status === 'ready' ? 'bg-green-900 text-green-300' :
-                    i.status === 'approved' ? 'bg-blue-900 text-blue-300' :
-                    'bg-gray-700 text-gray-300'
-                  }`}>{i.status.toUpperCase()}</span>
-                </div>
-                <div className="text-sm text-gray-400 mt-1">
-                  Consistency: {(i.consistency_score * 100).toFixed(1)}%
-                </div>
-              </div>
-            ))}
-            {identities.length === 0 && <p className="text-gray-400">No identities yet.</p>}
-          </div>
-        )}
-
-        {tab === 'shoots' && (
-          <div>
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold">Shoots ({shoots.length})</h3>
-              <button onClick={handleCreateShoot} className="bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded-lg text-sm">
-                + CREATE SHOOT
-              </button>
-            </div>
-            {shoots.map(s => (
-              <div key={s.id} className="bg-gray-800 rounded-lg p-4 mb-3">
-                <div className="flex items-center justify-between">
-                  <span className="font-medium">{s.name || s.theme}</span>
-                  <span className={`px-2 py-0.5 rounded text-xs ${
-                    s.status === 'completed' ? 'bg-green-900 text-green-300' :
-                    s.status === 'generating' ? 'bg-yellow-900 text-yellow-300' :
-                    'bg-gray-700 text-gray-300'
-                  }`}>{s.status.toUpperCase()}</span>
-                </div>
-                <div className="text-sm text-gray-400 mt-1">
-                  {s.image_count} images · {s.theme}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {tab === 'content' && (
-          <div>
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold">Content Packs ({packs.length})</h3>
-              <button onClick={handleCreatePack} className="bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded-lg text-sm">
-                + GENERATE PACK
-              </button>
-            </div>
-            {packs.map(p => (
-              <div key={p.id} className="bg-gray-800 rounded-lg p-4 mb-3">
-                <div className="flex items-center justify-between">
-                  <span className="font-medium">{p.name}</span>
-                  <span className={`px-2 py-0.5 rounded text-xs ${
-                    p.status === 'assembled' ? 'bg-green-900 text-green-300' : 'bg-gray-700 text-gray-300'
-                  }`}>{p.status.toUpperCase()}</span>
-                </div>
-                <div className="text-sm text-gray-400 mt-1">
-                  Platform: {p.platform} · Images: {p.images.length} · Videos: {p.videos.length}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {tab === 'analytics' && (
-          <div>
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold">Analytics ({analytics.length} days)</h3>
-              <button onClick={handleGenerateAnalytics} className="bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded-lg text-sm">
-                🔄 Generate Analytics
-              </button>
-            </div>
-            {analytics.length > 0 && (
-              <div className="grid grid-cols-4 gap-4 mb-4">
-                <div className="bg-gray-800 rounded-lg p-3">
-                  <div className="text-xs text-gray-400">Latest Followers</div>
-                  <div className="text-xl font-bold">{analytics[0]?.followers.toLocaleString()}</div>
-                </div>
-                <div className="bg-gray-800 rounded-lg p-3">
-                  <div className="text-xs text-gray-400">Engagement Rate</div>
-                  <div className="text-xl font-bold">{(analytics[0]?.engagement_rate * 100).toFixed(1)}%</div>
-                </div>
-                <div className="bg-gray-800 rounded-lg p-3">
-                  <div className="text-xs text-gray-400">Monthly Revenue</div>
-                  <div className="text-xl font-bold">${analytics[0]?.revenue.toLocaleString()}</div>
-                </div>
-                <div className="bg-gray-800 rounded-lg p-3">
-                  <div className="text-xs text-gray-400">Monthly Costs</div>
-                  <div className="text-xl font-bold">${analytics[0]?.costs.toLocaleString()}</div>
-                </div>
-              </div>
+      </header>
+      <div className="content">
+        <div className="persona-header">
+          <div className="persona-avatar" style={{ background: GRADIENTS[0] }}>
+            {persona.avatar_url ? (
+              <img src={persona.avatar_url} alt={persona.name} style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 'inherit' }} />
+            ) : (
+              persona.name[0]
             )}
           </div>
-        )}
-
-        {tab === 'revenue' && (
           <div>
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold">24-Month Forecast</h3>
-              <button onClick={handleGenerateForecast} className="bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded-lg text-sm">
-                🔄 Generate Forecast
-              </button>
-            </div>
-            {forecasts.length > 0 && forecasts[0]?.scenarios.map((s: any) => (
-              <div key={s.scenario} className="bg-gray-800 rounded-lg p-4 mb-3">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="font-medium capitalize">{s.scenario}</span>
-                  <span className="text-sm text-gray-400">
-                    24-month total: ${s.monthly_revenue.reduce((a: number, b: number) => a + b, 0).toLocaleString()}
-                  </span>
-                </div>
-                <div className="h-2 bg-gray-700 rounded overflow-hidden">
-                  <div
-                    className="h-full bg-gradient-to-r from-purple-500 to-pink-500 rounded"
-                    style={{ width: `${Math.min(100, s.monthly_revenue[23] / 500)}%` }}
-                  />
-                </div>
-              </div>
-            ))}
-            {forecasts.length === 0 && <p className="text-gray-400">Generate a forecast to see projections.</p>}
+            <h1 style={{ fontSize: 22, fontWeight: 600 }}>{persona.name}</h1>
+            <p className="persona-meta">Age {persona.age} · {persona.brand} · {persona.status}</p>
           </div>
-        )}
+          <div className="persona-actions">
+            <button onClick={() => toggleAutopilot(id, 'on')} className="secondary-button">Autopilot ON</button>
+          </div>
+        </div>
 
-        {tab === 'schedule' && (
-          <div>
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold">Content Calendar ({schedule.length} posts)</h3>
-              <button onClick={handleGenerateSchedule} className="bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded-lg text-sm">
-                📅 Auto-Schedule
-              </button>
-            </div>
-            {schedule.map(s => (
-              <div key={s.id} className="bg-gray-800 rounded-lg p-3 mb-2 flex items-center justify-between">
-                <span className="text-sm">{s.platform}</span>
-                <span className="text-sm text-gray-400">{new Date(s.scheduled_at).toLocaleDateString()}</span>
-                <span className={`px-2 py-0.5 rounded text-xs ${
-                  s.status === 'posted' ? 'bg-green-900 text-green-300' : 'bg-blue-900 text-blue-300'
-                }`}>{s.status}</span>
-              </div>
-            ))}
-          </div>
-        )}
+        <div className="tab-bar">
+          {TABS.map(t => (
+            <button key={t.key} onClick={() => setTab(t.key)} className={`tab-btn${tab === t.key ? ' active' : ''}`}>
+              {t.label}
+            </button>
+          ))}
+        </div>
 
-        {tab === 'workflows' && (
-          <div>
-            <h3 className="text-lg font-semibold mb-4">Workflows ({workflows.length})</h3>
-            {workflows.map(w => (
-              <div key={w.id} className="bg-gray-800 rounded-lg p-4 mb-3">
-                <div className="flex items-center justify-between">
-                  <span className="font-medium">{w.name}</span>
-                  <span className={`px-2 py-0.5 rounded text-xs ${
-                    w.status === 'completed' ? 'bg-green-900 text-green-300' :
-                    w.status === 'running' ? 'bg-yellow-900 text-yellow-300' :
-                    w.status === 'failed' ? 'bg-red-900 text-red-300' :
-                    'bg-gray-700 text-gray-300'
-                  }`}>{w.status.toUpperCase()}</span>
-                </div>
-                <div className="text-xs text-gray-400 mt-1">
-                  {w.workflow_type} · Steps: {w.current_step || 'pending'}
-                </div>
-              </div>
-            ))}
-            {workflows.length === 0 && <p className="text-gray-400">No workflows yet.</p>}
-          </div>
-        )}
+        <div className="panel">
+          {tabContent[tab]}
+        </div>
       </div>
-    </div>
+    </main>
   )
 }

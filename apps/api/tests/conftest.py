@@ -59,6 +59,16 @@ app.dependency_overrides[get_db] = override_get_db
 from app.workflows.engine import workflow_engine
 workflow_engine._session_factory = TestSessionLocal
 
+# Force mock providers for tests (avoid real LLM/image/voice calls)
+import os
+os.environ["PROVIDER_REGISTRY"] = "mock"
+from app.providers.registry import reset_registry, get_registry
+from app.config import get_settings
+get_settings.cache_clear()
+reset_registry()
+_registry = get_registry()
+assert _registry._mode == "mock", f"Expected mock, got {_registry._mode}"
+
 
 @pytest_asyncio.fixture
 async def db(setup_db):

@@ -23,16 +23,27 @@ from app.models import (
     GeneratedVoice, QAResult,
     ShootStatus, ContentPackStatus, QAStatus,
 )
-from app.providers.mocks import (
-    MockLLMProvider, MockImageProvider, MockVideoProvider,
-    MockVoiceProvider, MockStorageProvider,
-)
+from app.providers.registry import get_registry
 
-llm = MockLLMProvider()
-image_provider = MockImageProvider()
-video_provider = MockVideoProvider()
-voice_provider = MockVoiceProvider()
-storage = MockStorageProvider()
+
+def _get_llm():
+    return get_registry().get_llm_provider()
+
+
+def _get_image():
+    return get_registry().get_image_provider()
+
+
+def _get_video():
+    return get_registry().get_video_provider()
+
+
+def _get_voice():
+    return get_registry().get_voice_provider()
+
+
+def _get_storage():
+    return get_registry().get_storage_provider()
 
 
 async def plan_shoot_handler(
@@ -43,6 +54,7 @@ async def plan_shoot_handler(
     persona_id = input_data.get("persona_id")
     theme = input_data.get("theme", "lifestyle")
 
+    llm = _get_llm()
     result = await llm.complete(
         system_prompt="Generate a detailed shoot plan for a synthetic creator.",
         user_prompt=f"Plan a {theme} shoot for the persona",
@@ -76,8 +88,9 @@ async def generate_shoot_images_handler(
     theme = input_data.get("theme", "lifestyle")
 
     generated = []
+    img = _get_image()
     for i in range(image_count):
-        result = await image_provider.generate(
+        result = await img.generate(
             prompt=f"{theme} lifestyle photo, professional, high quality, shot {i+1}",
             negative_prompt="blurry, low quality",
             seed=random.randint(0, 2**31),
@@ -114,8 +127,9 @@ async def generate_shoot_videos_handler(
     video_count = min(input_data.get("video_count", 2), 5)
 
     generated = []
+    vid_prov = _get_video()
     for i in range(video_count):
-        result = await video_provider.text_to_video(
+        result = await vid_prov.text_to_video(
             prompt=f"{input_data.get('theme', 'lifestyle')} scene, shot {i+1}",
             duration=4.0,
         )
@@ -144,7 +158,8 @@ async def generate_voiceover_handler(
     persona_name = input_data.get("persona_name", "model")
     voice_style = input_data.get("voice_style", "South African English")
 
-    voice_result = await voice_provider.create_voice(
+    voc = _get_voice()
+    voice_result = await voc.create_voice(
         name=f"{persona_name}_shoot_voice",
         accent=voice_style,
     )
@@ -157,7 +172,7 @@ async def generate_voiceover_handler(
 
     generated = []
     for script in scripts:
-        synth = await voice_provider.synthesize(
+        synth = await voc.synthesize(
             text=script,
             voice_id=voice_id,
         )
@@ -183,7 +198,8 @@ async def quality_check_handler(
     input_data: dict, db: AsyncSession,
 ) -> dict:
     """Run QA on generated content."""
-    result = await llm.complete(
+    llm2 = _get_llm()
+    result = await llm2.complete(
         system_prompt="Evaluate content quality for a synthetic creator content pack.",
         user_prompt="QA check for generated content pack",
     )
@@ -244,8 +260,9 @@ async def generate_captions_handler(
     theme = input_data.get("theme", "lifestyle")
 
     captions = []
+    llm3 = _get_llm()
     for i in range(5):
-        result = await llm.complete(
+        result = await llm3.complete(
             system_prompt="Generate a social media caption for a lifestyle content creator.",
             user_prompt=f"Write a caption for a {theme} photo",
         )

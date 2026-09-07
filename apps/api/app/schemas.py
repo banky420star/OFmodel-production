@@ -55,6 +55,8 @@ class PersonaResponse(BaseModel):
     identity_status: str | None = None
     identity_score: float | None = None
     packs_count: int = 0
+    avatar_url: str = ""
+    job_id: UUID | None = None
     created_at: datetime
     updated_at: datetime
 

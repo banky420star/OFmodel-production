@@ -12,6 +12,7 @@ Flow:
 """
 
 from __future__ import annotations
+import json
 import random
 from typing import Any
 from uuid import UUID, uuid4
@@ -23,14 +24,23 @@ from app.models import (
     Persona, Identity, ReferenceDataset, TrainingJob, QAResult,
     PersonaStatus, IdentityStatus, QAStatus, WorkflowStatus,
 )
-from app.providers.mocks import (
-    MockLLMProvider, MockImageProvider, MockTrainerProvider, MockVoiceProvider,
-)
+from app.providers.registry import get_registry
 
-llm = MockLLMProvider()
-image_provider = MockImageProvider()
-trainer = MockTrainerProvider()
-voice = MockVoiceProvider()
+
+def _get_llm():
+    return get_registry().get_llm_provider()
+
+
+def _get_image():
+    return get_registry().get_image_provider()
+
+
+def _get_trainer():
+    return get_registry().get_trainer_provider()
+
+
+def _get_voice():
+    return get_registry().get_voice_provider()
 
 
 async def create_persona_handler(
@@ -65,19 +75,72 @@ async def generate_candidates_handler(
 ) -> dict:
     """Generate identity candidates using LLM."""
     persona_id = input_data["persona_id"]
-    result = await llm.complete(
-        system_prompt="Generate identity candidates for a fictional synthetic creator.",
-        user_prompt=f"Create 3 identity candidates for persona {input_data.get('persona_name', 'unknown')}",
+    persona_name = input_data.get('persona_name', 'unknown')
+    brand = input_data.get('brand', 'lifestyle')
+    age = input_data.get('age', 24)
+    appearance = input_data.get('appearance', {})
+    personality = input_data.get('personality', '')
+
+    llm = _get_llm()
+    schema = {
+        "candidates": [
+            {
+                "name": "string",
+                "appearance": "detailed physical description",
+                "personality": "comma-separated traits",
+                "consistency_score": 0.95
+            }
+        ]
+    }
+    system_prompt = (
+        "You are a creative AI director for a synthetic persona studio. "
+        "Generate realistic, detailed identity candidates for virtual influencer personas. "
+        "Each candidate must have a unique look that fits the brand."
     )
+    user_prompt = (
+        f"Generate 3 identity candidates for persona '{persona_name}', age {age}, "
+        f"brand: {brand}. Personality: {personality}. "
+        f"Appearance details: {appearance}. "
+        f"Each candidate needs: name, detailed physical appearance (hair, eyes, skin, build, style), "
+        f"personality traits (comma-separated), and consistency_score (0.80-0.99)."
+    )
+    result = await llm.complete(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        schema=schema,
+    )
+
+    # Parse LLM output into identity candidates
     candidates = []
-    for i in range(3):
+    llm_data = result.data.get("content", {}) if result.success else {}
+    raw_candidates = llm_data.get("candidates", []) if isinstance(llm_data, dict) else []
+
+    for i in range(max(len(raw_candidates), 3)):
+        if i < len(raw_candidates):
+            c = raw_candidates[i]
+            candidate_name = c.get("name", f"Candidate {i+1}")
+            appearance_desc = c.get("appearance", "")
+            personality_desc = c.get("personality", "")
+            score = float(c.get("consistency_score", 0.90))
+        else:
+            candidate_name = f"Candidate {i+1}"
+            appearance_desc = ""
+            personality_desc = ""
+            score = round(random.uniform(0.80, 0.95), 3)
+
         candidate = Identity(
             id=uuid4(),
             persona_id=UUID(persona_id),
-            name=f"Candidate {i+1}",
+            name=candidate_name,
             status=IdentityStatus.CANDIDATE,
-            consistency_score=round(random.uniform(0.80, 0.98), 3),
-            metadata_json={"source": "llm_generation", "candidate_index": i},
+            consistency_score=score,
+            metadata_json={
+                "source": "ollama" if result.success else "fallback",
+                "candidate_index": i,
+                "appearance": appearance_desc,
+                "personality": personality_desc,
+                "model": result.data.get("model", "unknown") if result.success else "none",
+            },
         )
         db.add(candidate)
         candidates.append(str(candidate.id))
@@ -119,34 +182,59 @@ async def build_reference_dataset_handler(
     input_data: dict, db: AsyncSession,
 ) -> dict:
     """Generate reference images for the identity."""
-    identity_id = input_data.get("identity_id") or input_data.get("step_2_output", {}).get("identity_id")
+    # Find identity_id from any previous step output
+    identity_id = input_data.get("identity_id")
+    if not identity_id:
+        for key in sorted(input_data.keys()):
+            if key.startswith("step_") and isinstance(input_data[key], dict):
+                if "identity_id" in input_data[key]:
+                    identity_id = input_data[key]["identity_id"]
+                    break
     if not identity_id:
         return {"error": "no identity_id"}
 
+    # Use identity engine for consistent face generation
+    from app.identity_engine import generate_identity_locked
+    from pathlib import Path as _Path
+    
+    persona_id = input_data.get("persona_id", "")
+    persona_name = input_data.get("persona_name", "model")
+    
     views = [
-        "frontal portrait", "left profile", "right profile",
-        "three quarter left", "three quarter right",
-        "smiling", "neutral expression",
-        "full body standing", "medium shot seated",
-        "indoor lighting", "outdoor natural light",
+        "frontal portrait, neutral expression, studio lighting",
+        "left profile, natural light",
+        "right profile, soft window light",
+        "three quarter view, warm smile",
+        "three quarter view, confident expression",
+        "full body standing, fashion pose",
+        "medium shot seated, relaxed",
+        "indoor lighting, cozy setting",
+        "outdoor natural light, golden hour",
     ]
-
+    
+    avatar_dir = _Path(__file__).parent.parent.parent / "storage" / "avatars"
+    dataset_dir = _Path(__file__).parent.parent.parent / "storage" / "datasets" / identity_id[:8]
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    
     image_keys = []
-    for view in views:
-        result = await image_provider.generate(
-            prompt=f"portrait of a {input_data.get('persona_name', 'model')}, {view}, high quality",
-            seed=random.randint(0, 2**31),
+    for i, view in enumerate(views):
+        out_path = str(dataset_dir / f"ref_{i+1:02d}.png")
+        result = generate_identity_locked(
+            persona_id_hex=persona_id,
+            scene_prompt=view,
+            output_path=out_path,
+            seed_override=hash(f"{identity_id}_{i}") % 2147483647,
         )
-        if result.success:
-            image_keys.append(result.data["image_key"])
-
+        if result["success"]:
+            image_keys.append(out_path)
+    
     dataset = ReferenceDataset(
         id=uuid4(),
         identity_id=UUID(identity_id),
         name="primary_reference",
-        image_keys=image_keys,
+        image_keys=json.dumps(image_keys),
         total_images=len(image_keys),
-        quality_score=round(random.uniform(0.85, 0.97), 3),
+        quality_score=round(len(image_keys) / len(views), 3),
     )
     db.add(dataset)
     await db.flush()
@@ -163,12 +251,22 @@ async def train_lora_handler(
     input_data: dict, db: AsyncSession,
 ) -> dict:
     """Train LoRA model for the identity."""
-    identity_id = input_data.get("identity_id") or input_data.get("step_2_output", {}).get("identity_id")
-    dataset_id = input_data.get("dataset_id") or input_data.get("step_4_output", {}).get("dataset_id")
+    # Find identity_id and dataset_id from any previous step output
+    identity_id = input_data.get("identity_id")
+    dataset_id = input_data.get("dataset_id")
+    if not identity_id or not dataset_id:
+        for key in sorted(input_data.keys()):
+            if key.startswith("step_") and isinstance(input_data[key], dict):
+                val = input_data[key]
+                if not identity_id and "identity_id" in val:
+                    identity_id = val["identity_id"]
+                if not dataset_id and "dataset_id" in val:
+                    dataset_id = val["dataset_id"]
     if not identity_id or not dataset_id:
         return {"error": "missing identity_id or dataset_id"}
 
-    result = await trainer.train(
+    tr = _get_trainer()
+    result = await tr.train(
         dataset_id=dataset_id,
         model_type="lora",
         rank=16,
@@ -201,11 +299,19 @@ async def validate_identity_handler(
     input_data: dict, db: AsyncSession,
 ) -> dict:
     """Validate identity consistency after training."""
-    identity_id = input_data.get("identity_id") or input_data.get("step_2_output", {}).get("identity_id")
+    # Find identity_id from any previous step output
+    identity_id = input_data.get("identity_id")
+    if not identity_id:
+        for key in sorted(input_data.keys()):
+            if key.startswith("step_") and isinstance(input_data[key], dict):
+                if "identity_id" in input_data[key]:
+                    identity_id = input_data[key]["identity_id"]
+                    break
     if not identity_id:
         return {"error": "no identity_id"}
 
-    result = await llm.complete(
+    llm2 = _get_llm()
+    result = await llm2.complete(
         system_prompt="Evaluate identity consistency. Return structured JSON with approved, identity_score, quality_score.",
         user_prompt="QA validation for trained identity model",
     )
@@ -245,11 +351,18 @@ async def create_voice_handler(
     input_data: dict, db: AsyncSession,
 ) -> dict:
     """Create voice profile for the identity."""
-    identity_id = input_data.get("identity_id") or input_data.get("step_2_output", {}).get("identity_id")
+    identity_id = input_data.get("identity_id")
+    if not identity_id:
+        for key in sorted(input_data.keys()):
+            if key.startswith("step_") and isinstance(input_data[key], dict):
+                if "identity_id" in input_data[key]:
+                    identity_id = input_data[key]["identity_id"]
+                    break
     persona_name = input_data.get("persona_name", "model")
     voice_style = input_data.get("voice_style", "South African English")
 
-    result = await voice.create_voice(
+    voc = _get_voice()
+    result = await voc.create_voice(
         name=f"{persona_name}_voice",
         description=f"Voice profile for {persona_name}",
         accent=voice_style,
@@ -257,7 +370,7 @@ async def create_voice_handler(
     )
 
     # Test synthesis
-    synth_result = await voice.synthesize(
+    synth_result = await voc.synthesize(
         text=f"Hello, I'm {persona_name}. Welcome to my world.",
         voice_id=result.data.get("voice_id", ""),
     )
@@ -275,7 +388,13 @@ async def activate_persona_handler(
     input_data: dict, db: AsyncSession,
 ) -> dict:
     """Activate the persona — set all systems go."""
-    identity_id = input_data.get("identity_id") or input_data.get("step_2_output", {}).get("identity_id")
+    identity_id = input_data.get("identity_id")
+    if not identity_id:
+        for key in sorted(input_data.keys()):
+            if key.startswith("step_") and isinstance(input_data[key], dict):
+                if "identity_id" in input_data[key]:
+                    identity_id = input_data[key]["identity_id"]
+                    break
     if identity_id:
         identity = await db.get(Identity, UUID(identity_id))
         if identity and identity.status != IdentityStatus.READY:

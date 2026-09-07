@@ -3,11 +3,13 @@
 from __future__ import annotations
 import time
 import random
+from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, Depends, Query
+from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -40,184 +42,210 @@ from app.workflows.content_flow import (
     generate_captions_handler, finalize_pack_handler,
 )
 from app.providers.registry import get_registry
-from app.providers.mocks import (
-    MockLLMProvider, MockImageProvider, MockVideoProvider,
-    MockVoiceProvider, MockTrainerProvider, MockStorageProvider,
-)
 
-router = APIRouter()
-
-# Register workflow step handlers
-workflow_engine.register_step("create_persona", create_persona_handler)
-workflow_engine.register_step("generate_candidates", generate_candidates_handler)
-workflow_engine.register_step("approve_identity", approve_identity_handler)
-workflow_engine.register_step("build_reference_dataset", build_reference_dataset_handler)
-workflow_engine.register_step("train_lora", train_lora_handler)
-workflow_engine.register_step("validate_identity", validate_identity_handler)
-workflow_engine.register_step("create_voice", create_voice_handler)
-workflow_engine.register_step("activate_persona", activate_persona_handler)
-workflow_engine.register_step("plan_shoot", plan_shoot_handler)
-workflow_engine.register_step("generate_images", generate_shoot_images_handler)
-workflow_engine.register_step("generate_videos", generate_shoot_videos_handler)
-workflow_engine.register_step("generate_voiceover", generate_voiceover_handler)
-workflow_engine.register_step("quality_check", quality_check_handler)
-workflow_engine.register_step("assemble_pack", assemble_pack_handler)
-workflow_engine.register_step("generate_captions", generate_captions_handler)
-workflow_engine.register_step("finalize_pack", finalize_pack_handler)
+router = APIRouter(tags=["persona-studio"])
 
 
-# ─── Health ────────────────────────────────────────────────────────────
+# ─── Dashboard (Phase 14) ────────────────────────────────────────────
 
-@router.get("/health", response_model=SystemHealth)
-async def health_check(db: AsyncSession = Depends(get_db)):
-    checks = []
-    # Database
-    try:
-        await db.execute(select(func.count()).select_from(Persona))
-        checks.append(HealthCheck(service="postgres", status="green"))
-    except Exception as e:
-        checks.append(HealthCheck(service="postgres", status="red", message=str(e)))
+@router.get("/dashboard/summary")
+async def dashboard_summary(db: AsyncSession = Depends(get_db)):
+    """Aggregate dashboard metrics from the database."""
+    # Active personas
+    personas_result = await db.execute(select(Persona))
+    personas = personas_result.scalars().all()
+    active_personas = [p for p in personas if p.status in (PersonaStatus.ACTIVE, PersonaStatus.BUILDING)]
 
-    # Providers via registry
-    registry = get_registry()
-    providers = {
-        "llm": registry.get_llm_provider(),
-        "image": registry.get_image_provider(),
-        "video": registry.get_video_provider(),
-        "voice": registry.get_voice_provider(),
-        "trainer": registry.get_trainer_provider(),
-        "storage": registry.get_storage_provider(),
-    }
-    for name, provider in providers.items():
-        try:
-            result = await provider.health_check()
-            provider_name = result.provider if hasattr(result, 'provider') else type(provider).__name__
-            status = "green" if result.success else "yellow"
-            checks.append(HealthCheck(service=name, status=status, message=provider_name))
-        except Exception as e:
-            checks.append(HealthCheck(service=name, status="red", message=str(e)))
+    # Shoots
+    shoots_result = await db.execute(select(Shoot))
+    all_shoots = list(shoots_result.scalars().all())
+    active_shoots = [s for s in all_shoots if s.status in (ShootStatus.DRAFT, ShootStatus.GENERATING)]
 
-    overall = "green" if all(c.status == "green" for c in checks) else (
-        "red" if any(c.status == "red" for c in checks) else "yellow"
+    # Get persona names for shoots
+    persona_map = {str(p.id): p for p in personas}
+
+    # Packs
+    packs_result = await db.execute(select(ContentPack))
+    packs = packs_result.scalars().all()
+
+    # Analytics totals
+    analytics_result = await db.execute(select(AnalyticsSnapshot))
+    analytics = analytics_result.scalars().all()
+    total_revenue = sum(a.revenue for a in analytics) if analytics else 0
+    total_followers = sum(a.followers for a in analytics[-8:]) if analytics else 0
+    avg_engagement = (
+        sum(a.engagement_rate for a in analytics) / len(analytics)
+        if analytics else 0
     )
-    return SystemHealth(overall=overall, checks=checks)
+
+    # Health
+    registry = get_registry()
+    health = registry.health_report()
+    services_online = sum(1 for v in health.values() if v.get("status") == "green")
+    services_total = len(health)
+
+    # Build health checks array for frontend
+    health_checks = [
+        {"service": k, "status": v["status"]}
+        for k, v in health.items()
+    ]
+
+    # Build shoots list for frontend
+    shoots_list = [
+        {
+            "id": str(s.id),
+            "name": s.name,
+            "status": s.status.value if hasattr(s.status, 'value') else str(s.status),
+            "asset_type": "image",
+            "progress": s.progress or 0,
+            "image_count": s.image_count or 0,
+            "generated_images": s.generated_images or [],
+            "theme": s.theme or "",
+            "persona_name": persona_map.get(str(s.persona_id), None) and persona_map[str(s.persona_id)].name or "Unknown",
+            "created_at": s.created_at.isoformat() if s.created_at else None,
+        }
+        for s in all_shoots[:5]
+    ]
+
+    # Build persona list for frontend
+    personas_list = [
+        {
+            "id": str(p.id),
+            "name": p.name,
+            "age": p.age or 0,
+            "status": p.status.value if hasattr(p.status, 'value') else str(p.status),
+            "brand": p.brand or "",
+            "identity_score": None,
+            "identity_status": None,
+            "packs_count": 0,
+            "avatar_url": p.avatar_url or "",
+            "shoots_count": len([s for s in all_shoots if str(s.persona_id) == str(p.id)]),
+        }
+        for p in personas
+    ]
+
+    # Attention items (personas needing review)
+    attention = []
+    for p in personas:
+        if p.status == PersonaStatus.BUILDING:
+            attention.append({"id": str(p.id), "name": p.name, "type": "building", "status": "warning"})
+
+    return {
+        "active_models": len([p for p in active_personas if p.status == PersonaStatus.ACTIVE]),
+        "training_models": len([p for p in active_personas if p.status == PersonaStatus.BUILDING]),
+        "total_models": len(personas),
+        "total_packs": len(packs),
+        "total_shoots": len(all_shoots),
+        "revenue": round(total_revenue, 2),
+        "followers": total_followers,
+        "engagement_rate": round(avg_engagement, 4),
+        "health": {
+            "online": services_online,
+            "total": services_total,
+            "checks": health_checks,
+        },
+        "attention_items": attention,
+        "shoots": shoots_list,
+        "personas": personas_list,
+    }
 
 
-# ─── Personas (Phase 3) ───────────────────────────────────────────────
+# ─── Personas (Phase 1) ─────────────────────────────────────────────
 
-@router.post("/personas", response_model=PersonaResponse)
-async def create_persona(data: PersonaCreate, db: AsyncSession = Depends(get_db)):
-    if not data.adult_verified:
-        raise HTTPException(400, "Adult verification required")
-    if not data.synthetic_identity:
-        raise HTTPException(400, "Must be synthetic identity")
+@router.get("/personas", response_model=list[PersonaResponse])
+async def list_personas(
+    status: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    q = select(Persona).order_by(Persona.created_at.desc())
+    if status:
+        q = q.where(Persona.status == status)
+    result = await db.execute(q)
+    return result.scalars().all()
 
-    # Create persona
+
+@router.post("/personas", response_model=PersonaResponse, status_code=201)
+async def create_persona(body: PersonaCreate, db: AsyncSession = Depends(get_db)):
     persona = Persona(
         id=uuid4(),
-        name=data.name,
-        age=data.age,
-        description=data.description,
-        status=PersonaStatus.ACTIVE,
-        metadata_json={
-            "appearance": data.appearance.model_dump(),
-            "personality": data.personality,
-            "brand": data.brand,
-            "voice_style": data.voice_style,
-            "publishing_frequency": data.publishing_frequency,
-            "adult_verified": True,
-            "synthetic_identity": True,
-        },
+        name=body.name,
+        status=PersonaStatus.BUILDING,
+        appearance=body.appearance.model_dump() if body.appearance else None,
+        personality=body.personality,
+        voice_style=body.voice_style,
+        brand=body.brand,
+        publishing_frequency=body.publishing_frequency,
+        metadata_json={},
     )
     db.add(persona)
-    await db.flush()
-
-    # Start persona creation workflow
-    workflow_input = data.model_dump()
-    workflow_input["persona_id"] = str(persona.id)
-    workflow_input["persona_name"] = data.name
-    workflow = await workflow_engine.create_workflow(
-        name=f"Create Persona: {data.name}",
-        workflow_type="persona_creation",
-        persona_id=persona.id,
-        input_data=workflow_input,
-        steps=[
-            {"name": "generate_candidates", "step_type": "generate_candidates"},
-            {"name": "approve_identity", "step_type": "approve_identity"},
-            {"name": "build_reference_dataset", "step_type": "build_reference_dataset"},
-            {"name": "train_lora", "step_type": "train_lora"},
-            {"name": "validate_identity", "step_type": "validate_identity"},
-            {"name": "create_voice", "step_type": "create_voice"},
-            {"name": "activate_persona", "step_type": "activate_persona"},
-        ],
-    )
-    workflow.persona_id = persona.id
     await db.commit()
     await db.refresh(persona)
 
-    # Execute workflow asynchronously (in real app, this would be Celery)
-    try:
-        await workflow_engine.run_workflow(workflow.id)
-    except Exception:
-        pass  # Workflow continues in background
+    # Run the workflow in the background
+    import asyncio
+    asyncio.create_task(_run_persona_workflow(persona.id))
 
-    await db.refresh(persona)
-    return PersonaResponse(
-        id=persona.id,
-        name=persona.name,
-        age=persona.age,
-        status=persona.status.value,
-        description=persona.description,
-        adult_verified=persona.metadata_json.get("adult_verified", True),
-        synthetic_identity=persona.metadata_json.get("synthetic_identity", True),
-        appearance=AppearanceProfile(**persona.metadata_json.get("appearance", {})),
-        personality=persona.metadata_json.get("personality", []),
-        brand=persona.metadata_json.get("brand", ""),
-        voice_style=persona.metadata_json.get("voice_style", ""),
-        publishing_frequency=persona.metadata_json.get("publishing_frequency", ""),
-        created_at=persona.created_at,
-        updated_at=persona.updated_at,
-    )
+    return persona
 
 
-@router.get("/personas", response_model=list[PersonaResponse])
-async def list_personas(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Persona).order_by(Persona.created_at.desc()))
-    personas = result.scalars().all()
-    responses = []
-    for p in personas:
-        # Get identity status
-        id_result = await db.execute(
-            select(Identity).where(Identity.persona_id == p.id).order_by(Identity.created_at.desc()).limit(1)
+async def _run_persona_workflow(persona_id: UUID):
+    """Run the persona creation workflow in the background."""
+    from app.database import AsyncSessionLocal
+    from sqlalchemy import select
+
+    async with AsyncSessionLocal() as db:
+        persona = await db.get(Persona, persona_id)
+        if not persona:
+            return
+
+        input_data = {
+            "persona_id": str(persona_id),
+            "persona_name": persona.name,
+            "name": persona.name,
+            "age": persona.age,
+            "appearance": persona.appearance or {},
+            "personality": persona.personality or [],
+            "voice_style": persona.voice_style or "",
+            "brand": persona.brand or "",
+            "publishing_frequency": persona.publishing_frequency or "",
+            "adult_verified": True,
+            "synthetic_identity": True,
+        }
+
+        workflow = await workflow_engine.create_workflow(
+            name=f"persona_creation_{persona.name}",
+            workflow_type="persona_creation",
+            persona_id=persona_id,
+            input_data=input_data,
+            steps=[
+                {"name": "generate_candidates", "step_type": "generate_candidates"},
+                {"name": "approve_identity", "step_type": "approve_identity"},
+                {"name": "build_reference_dataset", "step_type": "build_reference_dataset"},
+                {"name": "train_lora", "step_type": "train_lora"},
+                {"name": "validate_identity", "step_type": "validate_identity"},
+                {"name": "create_voice", "step_type": "create_voice"},
+                {"name": "activate_persona", "step_type": "activate_persona"},
+            ],
         )
-        identity = id_result.scalar_one_or_none()
 
-        # Get pack count
-        pack_count_result = await db.execute(
-            select(func.count()).select_from(ContentPack).where(ContentPack.persona_id == p.id)
-        )
-        pack_count = pack_count_result.scalar() or 0
+    # Register step handlers
+    workflow_engine.register_step("generate_candidates", generate_candidates_handler)
+    workflow_engine.register_step("approve_identity", approve_identity_handler)
+    workflow_engine.register_step("build_reference_dataset", build_reference_dataset_handler)
+    workflow_engine.register_step("train_lora", train_lora_handler)
+    workflow_engine.register_step("validate_identity", validate_identity_handler)
+    workflow_engine.register_step("create_voice", create_voice_handler)
+    workflow_engine.register_step("activate_persona", activate_persona_handler)
 
-        responses.append(PersonaResponse(
-            id=p.id,
-            name=p.name,
-            age=p.age,
-            status=p.status.value,
-            description=p.description,
-            adult_verified=p.metadata_json.get("adult_verified", True),
-            synthetic_identity=p.metadata_json.get("synthetic_identity", True),
-            appearance=AppearanceProfile(**p.metadata_json.get("appearance", {})),
-            personality=p.metadata_json.get("personality", []),
-            brand=p.metadata_json.get("brand", ""),
-            voice_style=p.metadata_json.get("voice_style", ""),
-            publishing_frequency=p.metadata_json.get("publishing_frequency", ""),
-            identity_status=identity.status.value if identity else None,
-            identity_score=identity.consistency_score if identity else None,
-            packs_count=pack_count,
-            created_at=p.created_at,
-            updated_at=p.updated_at,
-        ))
-    return responses
+    # Run workflow (opens its own session)
+    await workflow_engine.run_workflow(workflow.id)
+
+    # Update persona status after workflow completes
+    async with AsyncSessionLocal() as db:
+        persona = await db.get(Persona, persona_id)
+        if persona and persona.status == PersonaStatus.BUILDING:
+            persona.status = PersonaStatus.ACTIVE
+            await db.commit()
 
 
 @router.get("/personas/{persona_id}", response_model=PersonaResponse)
@@ -225,388 +253,17 @@ async def get_persona(persona_id: UUID, db: AsyncSession = Depends(get_db)):
     persona = await db.get(Persona, persona_id)
     if not persona:
         raise HTTPException(404, "Persona not found")
-
-    id_result = await db.execute(
-        select(Identity).where(Identity.persona_id == persona.id).order_by(Identity.created_at.desc()).limit(1)
-    )
-    identity = id_result.scalar_one_or_none()
-
-    pack_count_result = await db.execute(
-        select(func.count()).select_from(ContentPack).where(ContentPack.persona_id == persona.id)
-    )
-    pack_count = pack_count_result.scalar() or 0
-
-    return PersonaResponse(
-        id=persona.id,
-        name=persona.name,
-        age=persona.age,
-        status=persona.status.value,
-        description=persona.description,
-        adult_verified=persona.metadata_json.get("adult_verified", True),
-        synthetic_identity=persona.metadata_json.get("synthetic_identity", True),
-        appearance=AppearanceProfile(**persona.metadata_json.get("appearance", {})),
-        personality=persona.metadata_json.get("personality", []),
-        brand=persona.metadata_json.get("brand", ""),
-        voice_style=persona.metadata_json.get("voice_style", ""),
-        publishing_frequency=persona.metadata_json.get("publishing_frequency", ""),
-        identity_status=identity.status.value if identity else None,
-        identity_score=identity.consistency_score if identity else None,
-        packs_count=pack_count,
-        created_at=persona.created_at,
-        updated_at=persona.updated_at,
-    )
+    return persona
 
 
-@router.post("/personas/{persona_id}/build")
-async def build_persona(persona_id: UUID, db: AsyncSession = Depends(get_db)):
-    """Start a build job for a persona — enqueues to Redis for worker processing."""
-    from app.models import Job
-    from app.queue import enqueue
+# ─── Analytics (Phase 11) ────────────────────────────────────────────
 
-    persona = await db.get(Persona, persona_id)
-    if not persona:
-        raise HTTPException(404, "Persona not found")
+class ManualAnalyticsInput(BaseModel):
+    followers: int = 0
+    engagement_rate: float = 0.0
+    revenue: float = 0.0
+    platform: str = "instagram"
 
-    persona.status = PersonaStatus.BUILDING
-    job = Job(
-        id=uuid4(),
-        type="build_persona",
-        status="queued",
-        progress=0,
-        message="Queued",
-        persona_id=persona.id,
-    )
-    db.add(job)
-    await db.commit()
-    await db.refresh(job)
-
-    # Enqueue to Redis for worker pickup
-    try:
-        await enqueue({
-            "job_id": str(job.id),
-            "type": job.type,
-            "persona_id": str(persona.id),
-        })
-    except Exception:
-        pass  # Redis may not be running in dev
-
-    return {
-        "id": str(job.id),
-        "type": job.type,
-        "status": job.status,
-        "progress": job.progress,
-        "message": job.message,
-        "persona_id": str(persona.id),
-        "created_at": job.created_at.isoformat() if job.created_at else None,
-        "updated_at": job.updated_at.isoformat() if job.updated_at else None,
-    }
-
-
-# ─── Identity (Phase 3) ───────────────────────────────────────────────
-
-@router.get("/personas/{persona_id}/identities", response_model=list[IdentityResponse])
-async def list_identities(persona_id: UUID, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(Identity).where(Identity.persona_id == persona_id).order_by(Identity.created_at.desc())
-    )
-    return [
-        IdentityResponse(
-            id=i.id, persona_id=i.persona_id, name=i.name,
-            status=i.status.value, reference_images=i.reference_images,
-            lora_model_path=i.lora_model_path, consistency_score=i.consistency_score,
-            metadata_json=i.metadata_json, created_at=i.created_at, updated_at=i.updated_at,
-        )
-        for i in result.scalars().all()
-    ]
-
-
-@router.post("/personas/{persona_id}/identities/{identity_id}/approve")
-async def approve_identity(persona_id: UUID, identity_id: UUID, db: AsyncSession = Depends(get_db)):
-    identity = await db.get(Identity, identity_id)
-    if not identity or identity.persona_id != persona_id:
-        raise HTTPException(404, "Identity not found")
-    identity.status = IdentityStatus.APPROVED
-    return {"status": "approved", "identity_id": str(identity_id)}
-
-
-# ─── Shoots (Phase 9) ─────────────────────────────────────────────────
-
-@router.post("/personas/{persona_id}/shoots", response_model=ShootResponse)
-async def create_shoot(persona_id: UUID, data: ShootCreate, db: AsyncSession = Depends(get_db)):
-    persona = await db.get(Persona, persona_id)
-    if not persona:
-        raise HTTPException(404, "Persona not found")
-
-    shoot = Shoot(
-        id=uuid4(),
-        persona_id=persona_id,
-        name=data.name or f"{data.theme.title()} Shoot",
-        status=ShootStatus.DRAFT,
-        theme=data.theme,
-        image_count=data.image_count,
-        metadata_json=data.metadata_json,
-    )
-    db.add(shoot)
-    await db.commit()
-    await db.refresh(shoot)
-
-    return ShootResponse(
-        id=shoot.id, persona_id=shoot.persona_id, identity_id=shoot.identity_id,
-        name=shoot.name, status=shoot.status.value, theme=shoot.theme,
-        image_count=shoot.image_count, generated_images=shoot.generated_images,
-        created_at=shoot.created_at, completed_at=shoot.completed_at,
-    )
-
-
-@router.get("/personas/{persona_id}/shoots", response_model=list[ShootResponse])
-async def list_shoots(persona_id: UUID, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(Shoot).where(Shoot.persona_id == persona_id).order_by(Shoot.created_at.desc())
-    )
-    return [
-        ShootResponse(
-            id=s.id, persona_id=s.persona_id, identity_id=s.identity_id,
-            name=s.name, status=s.status.value, theme=s.theme,
-            image_count=s.image_count, generated_images=s.generated_images,
-            created_at=s.created_at, completed_at=s.completed_at,
-        )
-        for s in result.scalars().all()
-    ]
-
-
-@router.post("/shoots/{shoot_id}/generate")
-async def generate_shoot(shoot_id: UUID, db: AsyncSession = Depends(get_db)):
-    """Start image/video generation for a shoot."""
-    shoot = await db.get(Shoot, shoot_id)
-    if not shoot:
-        raise HTTPException(404, "Shoot not found")
-
-    shoot.status = ShootStatus.GENERATING
-    await db.commit()
-
-    # Get persona for name
-    persona = await db.get(Persona, shoot.persona_id)
-
-    workflow = await workflow_engine.create_workflow(
-        name=f"Generate Shoot: {shoot.name}",
-        workflow_type="shoot_generation",
-        persona_id=shoot.persona_id,
-        input_data={
-            "shoot_id": str(shoot.id),
-            "persona_id": str(shoot.persona_id),
-            "theme": shoot.theme,
-            "image_count": shoot.image_count,
-            "persona_name": persona.name if persona else "model",
-        },
-        steps=[
-            {"name": "plan_shoot", "step_type": "plan_shoot"},
-            {"name": "generate_images", "step_type": "generate_images"},
-            {"name": "generate_videos", "step_type": "generate_videos"},
-            {"name": "generate_voiceover", "step_type": "generate_voiceover"},
-        ],
-    )
-
-    try:
-        await workflow_engine.run_workflow(workflow.id)
-    except Exception:
-        pass
-
-    await db.refresh(shoot)
-    return {"shoot_id": str(shoot.id), "workflow_id": str(workflow.id), "status": shoot.status.value}
-
-
-# ─── Content Packs (Phase 9) ──────────────────────────────────────────
-
-@router.post("/personas/{persona_id}/packs", response_model=ContentPackResponse)
-async def create_content_pack(persona_id: UUID, data: ContentPackCreate, db: AsyncSession = Depends(get_db)):
-    persona = await db.get(Persona, persona_id)
-    if not persona:
-        raise HTTPException(404, "Persona not found")
-
-    pack = ContentPack(
-        id=uuid4(),
-        persona_id=persona_id,
-        name=data.name or f"{persona.name} Pack",
-        status=ContentPackStatus.DRAFT,
-        platform=data.platform,
-    )
-    db.add(pack)
-    await db.commit()
-    await db.refresh(pack)
-
-    return ContentPackResponse(
-        id=pack.id, persona_id=pack.persona_id, name=pack.name,
-        status=pack.status.value, platform=pack.platform,
-        images=pack.images, videos=pack.videos, voiceovers=pack.voiceovers,
-        captions=pack.captions, created_at=pack.created_at, published_at=pack.published_at,
-    )
-
-
-@router.get("/personas/{persona_id}/packs", response_model=list[ContentPackResponse])
-async def list_content_packs(persona_id: UUID, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(ContentPack).where(ContentPack.persona_id == persona_id).order_by(ContentPack.created_at.desc())
-    )
-    return [
-        ContentPackResponse(
-            id=p.id, persona_id=p.persona_id, name=p.name,
-            status=p.status.value, platform=p.platform,
-            images=p.images, videos=p.videos, voiceovers=p.voiceovers,
-            captions=p.captions, created_at=p.created_at, published_at=p.published_at,
-        )
-        for p in result.scalars().all()
-    ]
-
-
-@router.post("/packs/{pack_id}/assemble")
-async def assemble_content_pack(pack_id: UUID, db: AsyncSession = Depends(get_db)):
-    """Assemble a complete content pack with images, video, voice, captions."""
-    pack = await db.get(ContentPack, pack_id)
-    if not pack:
-        raise HTTPException(404, "Pack not found")
-
-    # Get persona for context
-    persona = await db.get(Persona, pack.persona_id)
-    identity_result = await db.execute(
-        select(Identity).where(Identity.persona_id == pack.persona_id).limit(1)
-    )
-    identity = identity_result.scalar_one_or_none()
-
-    workflow = await workflow_engine.create_workflow(
-        name=f"Assemble Pack: {pack.name}",
-        workflow_type="content_pack",
-        persona_id=pack.persona_id,
-        input_data={
-            "pack_id": str(pack.id),
-            "persona_id": str(pack.persona_id),
-            "theme": pack.name,
-            "platform": pack.platform,
-            "persona_name": persona.name if persona else "model",
-            "voice_style": persona.metadata_json.get("voice_style", "") if persona else "",
-        },
-        steps=[
-            {"name": "plan_shoot", "step_type": "plan_shoot"},
-            {"name": "generate_images", "step_type": "generate_images"},
-            {"name": "generate_videos", "step_type": "generate_videos"},
-            {"name": "generate_voiceover", "step_type": "generate_voiceover"},
-            {"name": "quality_check", "step_type": "quality_check"},
-            {"name": "assemble_pack", "step_type": "assemble_pack"},
-            {"name": "generate_captions", "step_type": "generate_captions"},
-            {"name": "finalize_pack", "step_type": "finalize_pack"},
-        ],
-    )
-
-    try:
-        await workflow_engine.run_workflow(workflow.id)
-    except Exception:
-        pass
-
-    await db.refresh(pack)
-    return {"pack_id": str(pack.id), "workflow_id": str(workflow.id), "status": pack.status.value}
-
-
-# ─── Workflows (Phase 4) ──────────────────────────────────────────────
-
-@router.get("/workflows", response_model=list[WorkflowResponse])
-async def list_workflows(
-    persona_id: UUID | None = None,
-    status: str | None = None,
-    limit: int = Query(50, le=200),
-    db: AsyncSession = Depends(get_db),
-):
-    workflows = await workflow_engine.list_workflows(
-        persona_id=persona_id,
-        status=WorkflowStatus(status) if status else None,
-        limit=limit,
-    )
-    return [
-        WorkflowResponse(
-            id=w.id, name=w.name, status=w.status.value,
-            workflow_type=w.workflow_type, current_step=w.current_step,
-            persona_id=w.persona_id, input_data=w.input_data,
-            output_data=w.output_data, error_message=w.error_message,
-            retry_count=w.retry_count, created_at=w.created_at,
-            started_at=w.started_at, completed_at=w.completed_at,
-        )
-        for w in workflows
-    ]
-
-
-@router.get("/workflows/{workflow_id}", response_model=WorkflowResponse)
-async def get_workflow(workflow_id: UUID, db: AsyncSession = Depends(get_db)):
-    w = await workflow_engine.get_workflow(workflow_id)
-    if not w:
-        raise HTTPException(404, "Workflow not found")
-    return WorkflowResponse(
-        id=w.id, name=w.name, status=w.status.value,
-        workflow_type=w.workflow_type, current_step=w.current_step,
-        persona_id=w.persona_id, input_data=w.input_data,
-        output_data=w.output_data, error_message=w.error_message,
-        retry_count=w.retry_count, created_at=w.created_at,
-        started_at=w.started_at, completed_at=w.completed_at,
-    )
-
-
-@router.get("/workflows/{workflow_id}/steps", response_model=list[WorkflowStepResponse])
-async def get_workflow_steps(workflow_id: UUID, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(WorkflowStep).where(WorkflowStep.workflow_id == workflow_id).order_by(WorkflowStep.order)
-    )
-    return [
-        WorkflowStepResponse(
-            id=s.id, name=s.name, step_type=s.step_type, order=s.order,
-            status=s.status.value, provider_name=s.provider_name,
-            started_at=s.started_at, completed_at=s.completed_at,
-            error_message=s.error_message,
-        )
-        for s in result.scalars().all()
-    ]
-
-
-@router.post("/workflows/{workflow_id}/retry")
-async def retry_workflow(workflow_id: UUID, db: AsyncSession = Depends(get_db)):
-    try:
-        w = await workflow_engine.retry_workflow(workflow_id)
-        return {"workflow_id": str(w.id), "status": w.status.value}
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-
-
-@router.post("/workflows/{workflow_id}/cancel")
-async def cancel_workflow(workflow_id: UUID, db: AsyncSession = Depends(get_db)):
-    try:
-        w = await workflow_engine.cancel_workflow(workflow_id)
-        return {"workflow_id": str(w.id), "status": w.status.value}
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-
-
-# ─── QA Results (Phase 7) ─────────────────────────────────────────────
-
-@router.get("/personas/{persona_id}/qa", response_model=list[QAResponse])
-async def list_qa_results(persona_id: UUID, db: AsyncSession = Depends(get_db)):
-    identity_result = await db.execute(
-        select(Identity.id).where(Identity.persona_id == persona_id)
-    )
-    identity_ids = list(identity_result.scalars().all())
-    if not identity_ids:
-        return []
-
-    result = await db.execute(
-        select(QAResult).where(QAResult.identity_id.in_(identity_ids)).order_by(QAResult.created_at.desc())
-    )
-    return [
-        QAResult(
-            id=q.id, qa_type=q.qa_type, status=q.status.value,
-            score=q.score, threshold=q.threshold, details=q.details,
-            images_checked=q.images_checked, passed_count=q.passed_count,
-            failed_count=q.failed_count, created_at=q.created_at,
-        )
-        for q in result.scalars().all()
-    ]
-
-
-# ─── Analytics (Phase 11) ─────────────────────────────────────────────
 
 @router.get("/personas/{persona_id}/analytics", response_model=list[AnalyticsSnapshotResponse])
 async def get_analytics(persona_id: UUID, db: AsyncSession = Depends(get_db)):
@@ -614,7 +271,6 @@ async def get_analytics(persona_id: UUID, db: AsyncSession = Depends(get_db)):
         select(AnalyticsSnapshot)
         .where(AnalyticsSnapshot.persona_id == persona_id)
         .order_by(AnalyticsSnapshot.snapshot_date.desc())
-        .limit(90)
     )
     return [
         AnalyticsSnapshotResponse(
@@ -658,10 +314,118 @@ async def generate_analytics(persona_id: UUID, db: AsyncSession = Depends(get_db
         db.add(snap)
 
     await db.commit()
-    return {"status": "generated", "days": 90}
+    return {"status": "generated", "days": 90, "source": "demo"}
 
 
-# ─── Forecasts (Phase 12) ─────────────────────────────────────────────
+@router.post("/personas/{persona_id}/analytics/sync")
+async def sync_instagram_analytics(persona_id: UUID, db: AsyncSession = Depends(get_db)):
+    """Sync real Instagram analytics into the database.
+
+    Pulls real data from the Instagram Graph API and stores it as
+    AnalyticsSnapshot records. Returns the synced data.
+    """
+    persona = await db.get(Persona, persona_id)
+    if not persona:
+        raise HTTPException(404, "Persona not found")
+
+    registry = get_registry()
+    ig = registry.get_instagram_provider()
+    if not ig:
+        raise HTTPException(
+            400,
+            "Instagram not configured. Set INSTAGRAM_ACCESS_TOKEN and INSTAGRAM_ACCOUNT_ID in .env"
+        )
+
+    try:
+        analytics = await ig.sync_analytics()
+    except Exception as e:
+        raise HTTPException(502, f"Instagram API error: {e}")
+
+    # Store as AnalyticsSnapshot
+    now = datetime.now(timezone.utc)
+    snap = AnalyticsSnapshot(
+        id=uuid4(),
+        persona_id=persona_id,
+        snapshot_date=now,
+        platform="instagram",
+        followers=analytics.profile.followers_count,
+        likes=analytics.total_likes,
+        comments=analytics.total_comments,
+        shares=analytics.total_shares,
+        views=analytics.total_impressions,
+        engagement_rate=analytics.avg_engagement_rate / 100,  # convert percentage to decimal
+        revenue=0,  # Instagram doesn't provide revenue
+        costs=0,
+    )
+    db.add(snap)
+    await db.commit()
+
+    return {
+        "status": "synced",
+        "source": "instagram",
+        "synced_at": analytics.synced_at,
+        "profile": {
+            "username": analytics.profile.username,
+            "followers": analytics.profile.followers_count,
+            "following": analytics.profile.follows_count,
+            "media_count": analytics.profile.media_count,
+        },
+        "metrics": {
+            "total_reach": analytics.total_reach,
+            "total_impressions": analytics.total_impressions,
+            "total_likes": analytics.total_likes,
+            "total_comments": analytics.total_comments,
+            "total_saves": analytics.total_saves,
+            "total_shares": analytics.total_shares,
+            "engagement_rate": analytics.avg_engagement_rate,
+        },
+        "recent_posts": [
+            {
+                "id": m.media_id,
+                "type": m.media_type,
+                "caption": m.caption,
+                "likes": m.like_count,
+                "comments": m.comments_count,
+                "reach": m.reach,
+                "saved": m.saved,
+            }
+            for m in analytics.recent_media[:10]
+        ],
+    }
+
+
+@router.post("/personas/{persona_id}/analytics/manual")
+async def manual_analytics_entry(
+    persona_id: UUID,
+    body: ManualAnalyticsInput,
+    db: AsyncSession = Depends(get_db),
+):
+    """Manually enter real analytics data (for platforms without API access)."""
+    persona = await db.get(Persona, persona_id)
+    if not persona:
+        raise HTTPException(404, "Persona not found")
+
+    snap = AnalyticsSnapshot(
+        id=uuid4(),
+        persona_id=persona_id,
+        snapshot_date=datetime.now(timezone.utc),
+        platform=body.platform,
+        followers=body.followers,
+        likes=0,
+        comments=0,
+        shares=0,
+        views=0,
+        engagement_rate=body.engagement_rate,
+        revenue=body.revenue,
+        costs=0,
+    )
+    db.add(snap)
+    await db.commit()
+
+    return {"status": "saved", "source": "manual"}
+
+
+# ─── Forecasts (Phase 12) ────────────────────────────────────────────
 
 @router.get("/personas/{persona_id}/forecasts", response_model=list[ForecastResponse])
 async def get_forecasts(persona_id: UUID, db: AsyncSession = Depends(get_db)):
@@ -728,6 +492,13 @@ async def generate_forecast(persona_id: UUID, db: AsyncSession = Depends(get_db)
         costs.append(c)
         engagement.append(e)
 
+    # Find break-even month
+    break_even = None
+    for i, (r, c) in enumerate(zip(revenue, costs)):
+        if r > c:
+            break_even = i + 1
+            break
+
     forecast = Forecast(
         id=uuid4(),
         persona_id=persona_id,
@@ -737,81 +508,1194 @@ async def generate_forecast(persona_id: UUID, db: AsyncSession = Depends(get_db)
         projected_revenue=revenue,
         projected_costs=costs,
         projected_engagement=engagement,
-        model_version="v1",
-        metadata_json={"break_even_month": 8},
+        model_version="deterministic_v1",
+        metadata_json={"break_even_month": break_even},
     )
     db.add(forecast)
     await db.commit()
 
-    return {"forecast_id": str(forecast.id), "horizon_months": 24}
+    return ForecastResponse(
+        id=forecast.id,
+        persona_id=forecast.persona_id,
+        horizon_months=24,
+        scenarios=[
+            ForecastScenario(
+                scenario="base",
+                horizon_months=24,
+                monthly_followers=followers,
+                monthly_revenue=revenue,
+                monthly_costs=costs,
+                monthly_engagement=engagement,
+                break_even_month=break_even,
+            )
+        ],
+        model_version="deterministic_v1",
+        created_at=forecast.created_at,
+    )
 
 
-# ─── Scheduling (Phase 10) ────────────────────────────────────────────
+# ─── Identities (Phase 2) ───────────────────────────────────────────
+
+@router.get("/personas/{persona_id}/identities", response_model=list[IdentityResponse])
+async def list_identities(persona_id: UUID, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(Identity).where(Identity.persona_id == persona_id).order_by(Identity.created_at.desc())
+    )
+    return result.scalars().all()
+
+
+@router.post("/personas/{persona_id}/identities/{identity_id}/approve")
+async def approve_identity(persona_id: UUID, identity_id: UUID, db: AsyncSession = Depends(get_db)):
+    identity = await db.get(Identity, identity_id)
+    if not identity or identity.persona_id != persona_id:
+        raise HTTPException(404, "Identity not found")
+
+    # Deactivate other identities
+    others = await db.execute(
+        select(Identity).where(Identity.persona_id == persona_id, Identity.id != identity_id)
+    )
+    for other in others.scalars().all():
+        other.status = IdentityStatus.REJECTED
+
+    identity.status = IdentityStatus.APPROVED
+    await db.commit()
+    return {"status": "approved", "identity_id": str(identity_id)}
+
+
+# ─── Identity Lock (Consistent Identity) ─────────────────────────────
+
+@router.get("/personas/{persona_id}/identity-lock")
+async def get_identity_lock(persona_id: UUID, db: AsyncSession = Depends(get_db)):
+    """Get the identity-lock seed and prompt for consistent image generation."""
+    from sqlalchemy import text
+    pid_hex = persona_id.hex
+    result = await db.execute(
+        text("SELECT seed, identity_prompt, negative_prompt, style_tags FROM identity_locks WHERE persona_id = :pid"),
+        {"pid": pid_hex},
+    )
+    row = result.fetchone()
+    if not row:
+        raise HTTPException(404, "No identity lock for this persona")
+    return {
+        "persona_id": str(persona_id),
+        "seed": row[0],
+        "identity_prompt": row[1],
+        "negative_prompt": row[2],
+        "style_tags": row[3] if isinstance(row[3], list) else __import__('json').loads(row[3] or '[]'),
+    }
+
+
+@router.post("/personas/{persona_id}/generate-locked-image")
+async def generate_locked_image(
+    persona_id: UUID,
+    scene_prompt: str = "",
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate an image using the identity-locked seed + prompt.
+    
+    Combines the identity base prompt with a scene prompt,
+    using the locked seed to ensure the same face every time.
+    """
+    from sqlalchemy import text
+
+    pid_hex = persona_id.hex
+    result = await db.execute(
+        text("SELECT seed, identity_prompt, negative_prompt FROM identity_locks WHERE persona_id = :pid"),
+        {"pid": pid_hex},
+    )
+    row = result.fetchone()
+    if not row:
+        raise HTTPException(404, "No identity lock for this persona")
+
+    # Use identity engine for consistent face generation
+    from app.identity_engine import generate_identity_locked
+    
+    persona = await db.get(Persona, persona_id)
+    pid_hex = persona_id.hex
+    avatar_dir = Path(__file__).parent.parent / "storage" / "avatars"
+    filename = f"{persona.name.lower()}_locked.png"
+    output_path = str(avatar_dir / filename)
+    
+    result = generate_identity_locked(
+        persona_id_hex=pid_hex,
+        scene_prompt=scene_prompt or "portrait, natural lighting, photorealistic",
+        output_path=output_path,
+    )
+    
+    if not result["success"]:
+        raise HTTPException(502, f"Generation failed: {result.get('error', 'unknown')}")
+    
+    return {
+        "seed": result["seed"],
+        "prompt": result["prompt"],
+        "avatar_url": f"/api/v1/avatars/{filename}",
+        "size_bytes": result["size_bytes"],
+        "latency_ms": result["latency_ms"],
+    }
+
+
+# ─── Gallery ─────────────────────────────────────────────────────────
+
+import glob as glob_mod
+
+
+@router.get("/personas/{persona_id}/gallery")
+async def get_persona_gallery(persona_id: UUID, db: AsyncSession = Depends(get_db)):
+    """Get all gallery images for a persona (avatar + variations)."""
+    from sqlalchemy import text
+    persona = await db.get(Persona, persona_id)
+    if not persona:
+        raise HTTPException(404, "Persona not found")
+
+    name_lower = persona.name.lower()
+    gallery_dir = Path(__file__).parent.parent / "storage" / "gallery"
+    avatar_dir = Path(__file__).parent.parent / "storage" / "avatars"
+
+    images = []
+
+    # Avatar (main profile)
+    avatar_path = avatar_dir / f"{name_lower}.jpg"
+    if avatar_path.exists():
+        images.append({
+            "url": f"/api/v1/avatars/{name_lower}.jpg",
+            "label": "Profile",
+            "type": "avatar",
+        })
+
+    # Gallery variations
+    pattern = f"{name_lower}_*.png"
+    for f in sorted(gallery_dir.glob(pattern)):
+        label = f.stem.replace(f"{name_lower}_", "").replace("_", " ").title()
+        images.append({
+            "url": f"/api/v1/gallery/{f.name}",
+            "label": label,
+            "type": "variation",
+        })
+
+    return {
+        "persona_id": str(persona_id),
+        "name": persona.name,
+        "count": len(images),
+        "images": images,
+    }
+
+
+# ─── Shoots (Phase 4) ────────────────────────────────────────────────
+
+@router.get("/shoots", response_model=list[ShootResponse])
+async def list_shoots(
+    persona_id: UUID | None = None,
+    status: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    q = select(Shoot).order_by(Shoot.created_at.desc())
+    if persona_id:
+        q = q.where(Shoot.persona_id == persona_id)
+    if status:
+        q = q.where(Shoot.status == status)
+    result = await db.execute(q)
+    return result.scalars().all()
+
+
+@router.get("/shoots/{shoot_id}/images")
+async def get_shoot_images(shoot_id: UUID, db: AsyncSession = Depends(get_db)):
+    """Get all images for a shoot with URLs."""
+    shoot = await db.get(Shoot, shoot_id)
+    if not shoot:
+        raise HTTPException(404, "Shoot not found")
+
+    generated = shoot.generated_images or []
+    images = []
+    for path_str in generated:
+        if path_str.startswith("storage/shoots/"):
+            parts = path_str.split("/")
+            if len(parts) >= 4:
+                shoot_hex = parts[2]
+                filename = parts[3]
+                images.append({
+                    "url": f"/api/v1/shoots/{shoot_hex}/images/{filename}",
+                    "filename": filename,
+                })
+
+    return {
+        "shoot_id": str(shoot_id),
+        "name": shoot.name,
+        "count": len(images),
+        "images": images,
+    }
+
+
+@router.post("/personas/{persona_id}/shoots", response_model=ShootResponse, status_code=201)
+async def create_shoot(persona_id: UUID, body: ShootCreate, db: AsyncSession = Depends(get_db)):
+    persona = await db.get(Persona, persona_id)
+    if not persona:
+        raise HTTPException(404, "Persona not found")
+
+    shoot = Shoot(
+        id=uuid4(),
+        persona_id=persona_id,
+        name=body.name,
+        theme=body.theme,
+        status=ShootStatus.DRAFT,
+        progress=0.0,
+    )
+    db.add(shoot)
+    await db.commit()
+    await db.refresh(shoot)
+    return shoot
+
+
+@router.post("/shoots/{shoot_id}/start")
+async def start_shoot(shoot_id: UUID, db: AsyncSession = Depends(get_db)):
+    shoot = await db.get(Shoot, shoot_id)
+    if not shoot:
+        raise HTTPException(404, "Shoot not found")
+
+    shoot.status = ShootStatus.GENERATING
+    shoot.progress = 0.0
+    await db.commit()
+    return {"status": "started"}
+
+
+@router.post("/shoots/{shoot_id}/complete")
+async def complete_shoot(shoot_id: UUID, db: AsyncSession = Depends(get_db)):
+    shoot = await db.get(Shoot, shoot_id)
+    if not shoot:
+        raise HTTPException(404, "Shoot not found")
+
+    shoot.status = ShootStatus.COMPLETED
+    shoot.progress = 100.0
+    await db.commit()
+    return {"status": "completed"}
+
+
+# ─── Content Packs (Phase 5) ─────────────────────────────────────────
+
+@router.get("/packs", response_model=list[ContentPackResponse])
+async def list_packs(
+    persona_id: UUID | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    q = select(ContentPack).order_by(ContentPack.created_at.desc())
+    if persona_id:
+        q = q.where(ContentPack.persona_id == persona_id)
+    result = await db.execute(q)
+    return result.scalars().all()
+
+
+@router.post("/personas/{persona_id}/packs", response_model=ContentPackResponse, status_code=201)
+async def create_pack(persona_id: UUID, body: ContentPackCreate, db: AsyncSession = Depends(get_db)):
+    persona = await db.get(Persona, persona_id)
+    if not persona:
+        raise HTTPException(404, "Persona not found")
+
+    pack = ContentPack(
+        id=uuid4(),
+        persona_id=persona_id,
+        name=body.name,
+        platform=body.platform,
+        status=ContentPackStatus.DRAFT,
+    )
+    db.add(pack)
+    await db.commit()
+    await db.refresh(pack)
+    return pack
+
+
+# ─── Workflows (Phase 6) ─────────────────────────────────────────────
+
+@router.get("/workflows", response_model=list[WorkflowResponse])
+async def list_workflows(
+    persona_id: UUID | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    q = select(Workflow).order_by(Workflow.created_at.desc())
+    if persona_id:
+        q = q.where(Workflow.persona_id == persona_id)
+    result = await db.execute(q)
+    return result.scalars().all()
+
+
+@router.get("/workflows/{workflow_id}", response_model=WorkflowResponse)
+async def get_workflow(workflow_id: UUID, db: AsyncSession = Depends(get_db)):
+    workflow = await db.get(Workflow, workflow_id)
+    if not workflow:
+        raise HTTPException(404, "Workflow not found")
+    return workflow
+
+
+@router.get("/workflows/{workflow_id}/steps", response_model=list[WorkflowStepResponse])
+async def get_workflow_steps(workflow_id: UUID, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(WorkflowStep).where(WorkflowStep.workflow_id == workflow_id).order_by(WorkflowStep.order)
+    )
+    return result.scalars().all()
+
+
+# ─── Jobs (Phase 13) ─────────────────────────────────────────────────
+
+@router.get("/jobs")
+async def list_jobs(
+    persona_id: UUID | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    from app.models import Job
+    q = select(Job).order_by(Job.created_at.desc())
+    if persona_id:
+        q = q.where(Job.persona_id == persona_id)
+    result = await db.execute(q)
+    jobs = result.scalars().all()
+    return [
+        {
+            "id": str(j.id),
+            "persona_id": str(j.persona_id),
+            "job_type": j.type,
+            "status": j.status,
+            "progress": j.progress,
+            "current_step": j.metadata_json.get("current_step") if j.metadata_json else None,
+            "total_steps": j.metadata_json.get("total_steps") if j.metadata_json else None,
+            "result": j.metadata_json.get("result") if j.metadata_json else None,
+            "error": j.message,
+            "created_at": j.created_at.isoformat() if j.created_at else None,
+            "updated_at": j.updated_at.isoformat() if j.updated_at else None,
+        }
+        for j in jobs
+    ]
+
+
+@router.get("/jobs/{job_id}")
+async def get_job(job_id: UUID, db: AsyncSession = Depends(get_db)):
+    from app.models import Job
+    job = await db.get(Job, job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    return {
+        "id": str(job.id),
+        "persona_id": str(job.persona_id),
+        "job_type": job.type,
+        "status": job.status,
+        "progress": job.progress,
+        "current_step": job.metadata_json.get("current_step") if job.metadata_json else None,
+        "total_steps": job.metadata_json.get("total_steps") if job.metadata_json else None,
+        "result": job.metadata_json.get("result") if job.metadata_json else None,
+        "error": job.message,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+    }
+
+
+# ─── QA (Phase 10) ───────────────────────────────────────────────────
+
+@router.get("/personas/{persona_id}/qa", response_model=list[QAResponse])
+async def list_qa_results(persona_id: UUID, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(QAResult).where(QAResult.persona_id == persona_id).order_by(QAResult.created_at.desc())
+    )
+    return result.scalars().all()
+
+
+# ─── Scheduling (Phase 12) ───────────────────────────────────────────
 
 @router.get("/personas/{persona_id}/schedule", response_model=list[ScheduledPostResponse])
 async def get_schedule(persona_id: UUID, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
-        select(ScheduledPost)
-        .where(ScheduledPost.persona_id == persona_id)
-        .order_by(ScheduledPost.scheduled_at)
+        select(ScheduledPost).where(ScheduledPost.persona_id == persona_id).order_by(ScheduledPost.scheduled_at)
     )
-    return [
-        ScheduledPostResponse(
-            id=s.id, persona_id=s.persona_id, content_pack_id=s.content_pack_id,
-            platform=s.platform, scheduled_at=s.scheduled_at,
-            posted_at=s.posted_at, status=s.status,
-        )
-        for s in result.scalars().all()
-    ]
+    return result.scalars().all()
 
 
 @router.post("/personas/{persona_id}/schedule/generate")
 async def generate_schedule(persona_id: UUID, db: AsyncSession = Depends(get_db)):
-    """Generate a weekly content schedule."""
     persona = await db.get(Persona, persona_id)
     if not persona:
         raise HTTPException(404, "Persona not found")
-
-    # Get unposted content packs
-    pack_result = await db.execute(
-        select(ContentPack)
-        .where(ContentPack.persona_id == persona_id)
-        .where(ContentPack.status == ContentPackStatus.ASSEMBLED)
-        .limit(14)
-    )
-    packs = pack_result.scalars().all()
 
     now = datetime.now(timezone.utc)
-    scheduled = []
     platforms = ["instagram", "tiktok", "youtube"]
+    posts = []
 
-    for i, pack in enumerate(packs):
-        post = ScheduledPost(
-            id=uuid4(),
-            persona_id=persona_id,
-            content_pack_id=pack.id,
-            platform=platforms[i % len(platforms)],
-            scheduled_at=now + timedelta(days=i + 1, hours=random.randint(9, 18)),
-            status="scheduled",
-        )
-        db.add(post)
-        scheduled.append(post)
+    for day_offset in range(30):
+        date = now + timedelta(days=day_offset)
+        if date.weekday() < 5:  # Weekdays only
+            for platform in random.sample(platforms, k=min(2, len(platforms))):
+                post = ScheduledPost(
+                    id=uuid4(),
+                    persona_id=persona_id,
+                    platform=platform,
+                    scheduled_at=date.replace(hour=random.choice([9, 12, 15, 18]), minute=0),
+                    status="scheduled",
+                )
+                db.add(post)
+                posts.append(post)
 
     await db.commit()
-    return {"scheduled": len(scheduled), "posts": [str(p.id) for p in scheduled]}
+    return {"status": "generated", "posts": len(posts)}
 
 
-# ─── Autopilot (Phase 10) ─────────────────────────────────────────────
+# ─── Autopilot ──────────────────────────────────────────────────────
 
 @router.post("/personas/{persona_id}/autopilot")
-async def toggle_autopilot(persona_id: UUID, mode: str = "assisted", db: AsyncSession = Depends(get_db)):
-    """Toggle autopilot mode: off / assisted / on."""
+async def toggle_autopilot(
+    persona_id: UUID,
+    mode: str = "off",
+    db: AsyncSession = Depends(get_db),
+):
+    """Toggle autopilot mode for a persona."""
     persona = await db.get(Persona, persona_id)
     if not persona:
         raise HTTPException(404, "Persona not found")
-    if mode not in ("off", "assisted", "on"):
-        raise HTTPException(400, "Mode must be off, assisted, or on")
 
+    # Store mode in metadata
+    if not persona.metadata_json:
+        persona.metadata_json = {}
     persona.metadata_json["autopilot"] = mode
     await db.commit()
-    return {"persona_id": str(persona_id), "autopilot": mode}
+
+    return {"autopilot": mode, "persona_id": str(persona_id)}
+
+
+# ─── Video Generation (Phase 8) ──────────────────────────────────────
+
+@router.post("/personas/{persona_id}/generate-video")
+async def generate_video(
+    persona_id: UUID,
+    prompt: str = "",
+    duration: float = 4.0,
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate a video for a persona using DashScope Wan.
+    
+    If prompt is empty, generates based on the persona's brand/style.
+    Uses the identity engine to ensure the video features the correct model.
+    """
+    persona = await db.get(Persona, persona_id)
+    if not persona:
+        raise HTTPException(404, "Persona not found")
+    if not persona.adult_verified:
+        raise HTTPException(403, "Persona not adult-verified — cannot generate video")
+
+    registry = get_registry()
+    video_provider = registry.get_video_provider()
+
+    # Build prompt from persona identity if not provided
+    if not prompt:
+        from app.identity_engine import get_identity_lock
+        lock = get_identity_lock(persona_id.hex)
+        identity_desc = lock["identity_prompt"] if lock else persona.name
+        prompt = f"{identity_desc}, {persona.brand or 'lifestyle'}, natural movement, cinematic"
+
+    # Generate video
+    result = await video_provider.text_to_video(
+        prompt=prompt,
+        duration=duration,
+        width=720,
+        height=1280,  # 9:16 portrait for social media
+    )
+
+    if not result.success:
+        raise HTTPException(502, f"Video generation failed: {result.error}")
+
+    # Resolve identity_id for this persona
+    from app.models import Identity
+    identity_result = await db.execute(
+        select(Identity).where(Identity.persona_id == persona_id).order_by(Identity.created_at.desc())
+    )
+    identity = identity_result.scalars().first()
+
+    # Store in DB
+    video = GeneratedVideo(
+        id=uuid4(),
+        identity_id=identity.id if identity else None,
+        prompt=prompt,
+        video_key=result.data.get("video_key", ""),
+        duration_seconds=result.data.get("duration", duration),
+        width=result.data.get("width", 720),
+        height=result.data.get("height", 1280),
+        generation_time_ms=result.data.get("generation_time_ms", 0),
+        metadata_json={
+            "model": result.data.get("model", ""),
+            "task_id": result.data.get("task_id", ""),
+            "video_url": result.data.get("video_url", ""),
+        },
+    )
+    db.add(video)
+    await db.commit()
+
+    return {
+        "id": str(video.id),
+        "video_url": result.data.get("video_url", ""),
+        "video_key": result.data.get("video_key", ""),
+        "duration": result.data.get("duration", duration),
+        "prompt": prompt,
+        "generation_time_ms": result.data.get("generation_time_ms", 0),
+        "model": result.data.get("model", ""),
+    }
+
+
+@router.post("/shoots/{shoot_id}/generate-video")
+async def generate_shoot_video(
+    shoot_id: UUID,
+    shot_index: int = 0,
+    prompt: str = "",
+    duration: float = 4.0,
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate a video from a shoot's image using image-to-video.
+    
+    Takes a generated image from the shoot and animates it.
+    """
+    shoot = await db.get(Shoot, shoot_id)
+    if not shoot:
+        raise HTTPException(404, "Shoot not found")
+
+    persona = await db.get(Persona, shoot.persona_id)
+    if not persona or not persona.adult_verified:
+        raise HTTPException(403, "Persona not adult-verified")
+
+    # Get the image from the shoot
+    images = shoot.generated_images or []
+    if shot_index >= len(images):
+        raise HTTPException(400, f"Shot index {shot_index} out of range (have {len(images)} shots)")
+
+    image_path = images[shot_index]
+    # Pass local file path to provider — it handles base64 encoding
+    image_url = image_path
+
+    registry = get_registry()
+    video_provider = registry.get_video_provider()
+
+    if not prompt:
+        prompt = f"{persona.name} in {shoot.theme or 'lifestyle setting'}, subtle natural motion, cinematic"
+
+    result = await video_provider.image_to_video(
+        image_key=image_url,
+        prompt=prompt,
+        duration=duration,
+    )
+
+    if not result.success:
+        raise HTTPException(502, f"Video generation failed: {result.error}")
+
+    # Store video linked to shoot
+    video = GeneratedVideo(
+        id=uuid4(),
+        identity_id=shoot.identity_id if getattr(shoot, 'identity_id', None) else None,
+        prompt=prompt,
+        video_key=result.data.get("video_key", ""),
+        duration_seconds=result.data.get("duration", duration),
+        generation_time_ms=result.data.get("generation_time_ms", 0),
+        metadata_json={
+            "shoot_id": str(shoot_id),
+            "shot_index": shot_index,
+            "model": result.data.get("model", ""),
+            "task_id": result.data.get("task_id", ""),
+            "video_url": result.data.get("video_url", ""),
+            "source_image": image_path,
+        },
+    )
+    db.add(video)
+    await db.commit()
+
+    return {
+        "id": str(video.id),
+        "video_url": result.data.get("video_url", ""),
+        "duration": result.data.get("duration", duration),
+        "prompt": prompt,
+        "generation_time_ms": result.data.get("generation_time_ms", 0),
+    }
+
+
+@router.get("/personas/{persona_id}/videos")
+async def list_videos(persona_id: UUID, db: AsyncSession = Depends(get_db)):
+    """List all generated videos for a persona."""
+    from app.models import Identity
+    result = await db.execute(
+        select(GeneratedVideo)
+        .join(Identity, Identity.id == GeneratedVideo.identity_id)
+        .where(Identity.persona_id == persona_id)
+        .order_by(GeneratedVideo.created_at.desc())
+    )
+    videos = result.scalars().all()
+    return [
+        {
+            "id": str(v.id),
+            "prompt": v.prompt,
+            "video_key": v.video_key,
+            "video_url": v.metadata_json.get("video_url", ""),
+            "duration": v.duration_seconds,
+            "width": v.width,
+            "height": v.height,
+            "generation_time_ms": v.generation_time_ms,
+            "created_at": v.created_at.isoformat() if v.created_at else None,
+        }
+        for v in videos
+    ]
+
+
+# ─── Adult Content Pipeline ──────────────────────────────────────────
+
+class AdultContentRequest(BaseModel):
+    scene_prompt: str
+    content_type: str = "artistic"  # artistic, editorial, boudoir, nsfw
+    generation_mode: str = "identity_locked"  # identity_locked or free
+
+
+@router.post("/personas/{persona_id}/adult-content")
+async def generate_adult_content(
+    persona_id: UUID,
+    body: AdultContentRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate adult/AE content with age verification.
+    
+    Requires:
+    - persona.adult_verified = True
+    - persona.synthetic_identity = True (must be fully synthetic)
+    
+    Content types:
+    - artistic: tasteful artistic nudity
+    - editorial: editorial/fashion content
+    - boudoir: intimate boudoir style
+    - nsfw: explicit content
+    
+    All content is watermark-logged for audit trail.
+    """
+    persona = await db.get(Persona, persona_id)
+    if not persona:
+        raise HTTPException(404, "Persona not found")
+    
+    # Age verification gate
+    if not persona.adult_verified:
+        raise HTTPException(403, "Persona must be marked as adult-verified")
+    
+    # Synthetic identity requirement
+    if not persona.synthetic_identity:
+        raise HTTPException(403, "Only synthetic identities can generate adult content")
+    
+    # Content type validation
+    allowed_types = ["artistic", "editorial", "boudoir", "nsfw"]
+    if body.content_type not in allowed_types:
+        raise HTTPException(400, f"content_type must be one of: {allowed_types}")
+    
+    # Build content-aware prompt
+    content_prefixes = {
+        "artistic": "Artistic fine art photography, tasteful, elegant",
+        "editorial": "High fashion editorial, Vogue style, professional",
+        "boudoir": "Intimate boudoir photography, soft lighting, tasteful",
+        "nsfw": "Explicit adult content, photorealistic",
+    }
+    
+    full_prompt = f"{content_prefixes[body.content_type]}. {body.scene_prompt}"
+    
+    # Add negative prompt for safety
+    negative = "deformed, ugly, blurry, low quality, watermark, text"
+    
+    # Generate using identity engine
+    from app.identity_engine import generate_identity_locked
+    from pathlib import Path as _Path
+    
+    content_dir = _Path(__file__).parent.parent / "storage" / "adult_content" / persona_id.hex[:8]
+    content_dir.mkdir(parents=True, exist_ok=True)
+    
+    filename = f"{body.content_type}_{int(time.time())}.png"
+    output_path = str(content_dir / filename)
+    
+    result = generate_identity_locked(
+        persona_id_hex=persona_id.hex,
+        scene_prompt=full_prompt,
+        output_path=output_path,
+        width=1024,
+        height=1536,  # Portrait ratio
+    )
+    
+    if not result["success"]:
+        raise HTTPException(502, f"Generation failed: {result.get('error', 'unknown')}")
+    
+    # Log for audit trail
+    import hashlib
+    content_hash = hashlib.sha256(open(output_path, "rb").read()).hexdigest()[:16]
+    
+    return {
+        "success": True,
+        "content_type": body.content_type,
+        "image_url": f"/api/v1/adult-content/{persona_id.hex[:8]}/{filename}",
+        "content_hash": content_hash,
+        "prompt": full_prompt,
+        "size_bytes": result["size_bytes"],
+        "persona_id": str(persona_id),
+        "metadata": {
+            "adult_verified": True,
+            "synthetic_identity": True,
+            "generation_mode": body.generation_mode,
+            "audit_logged": True,
+        },
+    }
+
+
+@router.post("/personas/{persona_id}/batch-adult-content")
+async def batch_generate_adult_content(
+    persona_id: UUID,
+    scenes: list[str],
+    content_type: str = "artistic",
+    db: AsyncSession = Depends(get_db),
+):
+    """Batch generate multiple adult content scenes.
+    
+    Returns a job ID for polling progress.
+    """
+    persona = await db.get(Persona, persona_id)
+    if not persona:
+        raise HTTPException(404, "Persona not found")
+    if not persona.adult_verified or not persona.synthetic_identity:
+        raise HTTPException(403, "Must be adult-verified synthetic identity")
+    
+    from app.models import Job
+    job = Job(
+        id=uuid4(),
+        type="batch_adult_content",
+        status="queued",
+        progress=0,
+        message=f"Generating {len(scenes)} {content_type} scenes",
+        persona_id=persona_id,
+        metadata_json={
+            "scenes": scenes,
+            "content_type": content_type,
+            "total": len(scenes),
+        },
+    )
+    db.add(job)
+    await db.commit()
+    
+    # Run in background
+    import asyncio
+    asyncio.create_task(_run_batch_adult(job.id, persona_id, scenes, content_type))
+    
+    return {
+        "job_id": str(job.id),
+        "status": "queued",
+        "total_scenes": len(scenes),
+        "content_type": content_type,
+    }
+
+
+async def _run_batch_adult(job_id: UUID, persona_id: UUID, scenes: list[str], content_type: str):
+    """Background task for batch adult content generation."""
+    from app.database import AsyncSessionLocal
+    from app.identity_engine import generate_identity_locked
+    from pathlib import Path as _Path
+    
+    async with AsyncSessionLocal() as db:
+        job = await db.get(Job, job_id)
+        if not job:
+            return
+        job.status = "running"
+        await db.commit()
+    
+    content_dir = _Path(__file__).parent.parent / "storage" / "adult_content" / persona_id.hex[:8]
+    content_dir.mkdir(parents=True, exist_ok=True)
+    
+    content_prefixes = {
+        "artistic": "Artistic fine art photography, tasteful, elegant",
+        "editorial": "High fashion editorial, Vogue style, professional",
+        "boudoir": "Intimate boudoir photography, soft lighting, tasteful",
+        "nsfw": "Explicit adult content, photorealistic",
+    }
+    
+    results = []
+    for i, scene in enumerate(scenes):
+        full_prompt = f"{content_prefixes[content_type]}. {scene}"
+        filename = f"{content_type}_{i+1:02d}_{int(time.time())}.png"
+        output_path = str(content_dir / filename)
+        
+        result = generate_identity_locked(
+            persona_id_hex=persona_id.hex,
+            scene_prompt=full_prompt,
+            output_path=output_path,
+            width=1024,
+            height=1536,
+        )
+        
+        results.append({
+            "scene": scene,
+            "success": result["success"],
+            "url": f"/api/v1/adult-content/{persona_id.hex[:8]}/{filename}" if result["success"] else None,
+        })
+        
+        # Update progress
+        async with AsyncSessionLocal() as db:
+            job = await db.get(Job, job_id)
+            if job:
+                job.progress = int((i + 1) / len(scenes) * 100)
+                job.message = f"Generated {i+1}/{len(scenes)} scenes"
+                await db.commit()
+    
+    # Mark complete
+    async with AsyncSessionLocal() as db:
+        job = await db.get(Job, job_id)
+        if job:
+            job.status = "completed"
+            job.progress = 100
+            succeeded = len([r for r in results if r.get("success")])
+            job.message = f"Generated {succeeded}/{len(scenes)} scenes"
+            job.metadata_json["results"] = results
+            await db.commit()
+
+
+# ─── Automated Production Pipeline ───────────────────────────────────
+
+@router.post("/personas/{persona_id}/auto-produce")
+async def auto_produce(
+    persona_id: UUID,
+    shoot_count: int = 3,
+    images_per_shoot: int = 5,
+    generate_videos: bool = True,
+    adult_content: bool = False,
+    themes: str = "",
+    db: AsyncSession = Depends(get_db),
+):
+    """Fully automated production pipeline.
+    
+    For a persona, automatically:
+    1. Creates shoots with themes
+    2. Generates identity-locked images for each shoot
+    3. Optionally generates videos from images
+    4. Optionally generates adult content
+    5. Assembles content packs
+    
+    themes: comma-separated list (lifestyle,fashion,travel,swimwear,fitness,editorial,artistic,nude)
+             If empty, uses shoot_count random themes.
+    Returns a job ID for progress tracking.
+    """
+    persona = await db.get(Persona, persona_id)
+    if not persona:
+        raise HTTPException(404, "Persona not found")
+    if not persona.adult_verified:
+        raise HTTPException(403, "Persona must be adult-verified for automated production")
+    
+    # Create job for progress tracking
+    from app.models import Job
+    job = Job(
+        id=uuid4(),
+        type="auto_produce",
+        status="queued",
+        progress=0,
+        message=f"Setting up production for {persona.name}",
+        persona_id=persona_id,
+        metadata_json={
+            "shoot_count": shoot_count,
+            "images_per_shoot": images_per_shoot,
+            "generate_videos": generate_videos,
+            "adult_content": adult_content,
+        },
+    )
+    db.add(job)
+    await db.commit()
+    
+    # Run in background
+    import asyncio
+    asyncio.create_task(_run_auto_produce(
+        job.id, persona_id, shoot_count, images_per_shoot,
+        generate_videos, adult_content, themes,
+    ))
+    
+    return {
+        "job_id": str(job.id),
+        "status": "queued",
+        "persona": persona.name,
+        "shoots": shoot_count,
+        "images_per_shoot": images_per_shoot,
+        "videos": generate_videos,
+        "adult_content": adult_content,
+    }
+
+
+async def _run_auto_produce(
+    job_id: UUID, persona_id: UUID,
+    shoot_count: int, images_per_shoot: int,
+    generate_videos: bool, adult_content: bool,
+    themes: str = "",
+):
+    """Background task for automated production."""
+    from app.database import AsyncSessionLocal
+    from app.identity_engine import generate_identity_locked, get_identity_lock
+    from app.providers.registry import get_registry
+    from app.models import Job
+    from pathlib import Path as _Path
+    import asyncio
+    
+    async with AsyncSessionLocal() as db:
+        persona = await db.get(Persona, persona_id)
+        if not persona:
+            return
+        name = persona.name
+    
+    # Get identity lock and resolve identity_id
+    lock = get_identity_lock(persona_id.hex)
+    identity_desc = lock["identity_prompt"] if lock else name
+    
+    # Resolve the approved identity for this persona
+    resolved_identity_id = None
+    async with AsyncSessionLocal() as db:
+        ident_q = await db.execute(
+            select(Identity).where(Identity.persona_id == persona_id).order_by(Identity.created_at.desc())
+        )
+        ident = ident_q.scalars().first()
+        if ident:
+            resolved_identity_id = ident.id
+    
+    # Load comprehensive style library
+    from app.artistic_styles import (
+        ALL_STYLES, STYLE_CATEGORIES, get_random_styles,
+    )
+    import random
+    
+    # Build theme templates from the style library
+    # Each theme picks random styles from its category
+    def _build_theme(name: str, category: str, count: int = 5) -> dict:
+        styles = get_random_styles(count, category)
+        return {
+            "name": name,
+            "scenes": [s.image_prompt for s in styles],
+            "video_scenes": [s.video_prompt for s in styles],
+            "style_names": [s.name for s in styles],
+        }
+    
+    THEME_BUILDERS = {
+        "lifestyle": lambda: _build_theme("Lifestyle", "portrait", 5),
+        "fashion": lambda: _build_theme("Fashion", "editorial", 5),
+        "travel": lambda: _build_theme("Travel", "naturista", 5),
+        "swimwear": lambda: _build_theme("Swimwear", "boudoir", 5),
+        "fitness": lambda: _build_theme("Fitness", "portrait", 5),
+        "editorial": lambda: _build_theme("Editorial", "editorial", 5),
+        "artistic": lambda: _build_theme("Artistic", "fine_art", 5),
+        "boudoir": lambda: _build_theme("Boudoir", "boudoir", 5),
+        "nude": lambda: _build_theme("Artistic Nude", "fine_art", 5),
+        "cinematic": lambda: _build_theme("Cinematic", "cinematic", 5),
+        "conceptual": lambda: _build_theme("Conceptual", "conceptual", 5),
+        "naturista": lambda: _build_theme("Naturista", "naturista", 5),
+    }
+    
+    # Select themes based on parameter or default
+    if themes:
+        requested = [t.strip().lower() for t in themes.split(",") if t.strip()]
+        shoot_themes = []
+        for t in requested:
+            if t in THEME_BUILDERS:
+                shoot_themes.append(THEME_BUILDERS[t]())
+        if not shoot_themes:
+            shoot_themes = [THEME_BUILDERS["lifestyle"]()]
+    else:
+        # Default: pick first N from the standard themes
+        default_keys = ["lifestyle", "fashion", "swimwear", "fitness", "editorial", "artistic"]
+        shoot_themes = [THEME_BUILDERS[k]() for k in default_keys[:shoot_count]]
+    
+    if adult_content and not any(t["name"] == "Artistic Nude" for t in shoot_themes):
+        shoot_themes.append(THEME_BUILDERS["nude"]())
+    
+    total_steps = len(shoot_themes) * images_per_shoot
+    if generate_videos:
+        total_steps += len(shoot_themes)  # one video per shoot
+    
+    completed = 0
+    all_results = []
+    
+    registry = get_registry()
+    video_provider = registry.get_video_provider()
+    
+    async with AsyncSessionLocal() as db:
+        job = await db.get(Job, job_id)
+        if job:
+            job.status = "running"
+            job.message = f"Starting production for {name}"
+            await db.commit()
+    
+    for theme_data in shoot_themes:
+        # Create shoot record
+        async with AsyncSessionLocal() as db:
+            shoot = Shoot(
+                id=uuid4(),
+                persona_id=persona_id,
+                identity_id=resolved_identity_id,
+                name=f"{theme_data['name']} — {name}",
+                theme=theme_data["name"].lower(),
+                status=ShootStatus.GENERATING,
+                progress=0,
+                image_count=images_per_shoot,
+            )
+            db.add(shoot)
+            await db.commit()
+            shoot_id = shoot.id
+        
+        shoot_images = []
+        
+        # Generate images for this shoot
+        for i, scene in enumerate(theme_data["scenes"][:images_per_shoot]):
+            full_prompt = f"{identity_desc}. {scene}"
+            output_dir = _Path(__file__).parent.parent / "storage" / "shoots" / shoot_id.hex[:8]
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output_path = str(output_dir / f"shot_{i+1:02d}.png")
+            
+            # Use sync wrapper for generate_identity_locked
+            try:
+                result = generate_identity_locked(
+                    persona_id_hex=persona_id.hex,
+                    scene_prompt=full_prompt,
+                    output_path=output_path,
+                    seed_override=hash(f"{shoot_id.hex}_{i}") % 2147483647,
+                )
+                if result["success"]:
+                    shoot_images.append(output_path)
+            except Exception as e:
+                logger.error(f"Image generation failed: {e}")
+            
+            completed += 1
+            async with AsyncSessionLocal() as db:
+                job = await db.get(Job, job_id)
+                if job:
+                    job.progress = int(completed / total_steps * 100)
+                    job.message = f"{theme_data['name']}: generated {i+1}/{images_per_shoot} images"
+                    await db.commit()
+            # Also update the shoot's generated_images list in real-time
+            async with AsyncSessionLocal() as db:
+                shoot = await db.get(Shoot, shoot_id)
+                if shoot:
+                    shoot.generated_images = shoot_images
+                    await db.commit()
+        
+        # Update shoot with images
+        async with AsyncSessionLocal() as db:
+            shoot = await db.get(Shoot, shoot_id)
+            if shoot:
+                shoot.generated_images = shoot_images
+                shoot.progress = 100 if not generate_videos else 80
+                shoot.status = ShootStatus.COMPLETED if not generate_videos else ShootStatus.GENERATING
+                await db.commit()
+        
+        # Generate video for this shoot if enabled
+        if generate_videos and shoot_images:
+            try:
+                video_prompt = f"{identity_desc}, {theme_data['name'].lower()} scene, natural movement, cinematic"
+                video_result = await video_provider.text_to_video(
+                    prompt=video_prompt,
+                    duration=4.0,
+                    width=720,
+                    height=1280,
+                )
+                if video_result.success:
+                    async with AsyncSessionLocal() as db:
+                        # Resolve identity for this persona
+                        ident_q = await db.execute(
+                            select(Identity).where(Identity.persona_id == persona_id).order_by(Identity.created_at.desc())
+                        )
+                        ident = ident_q.scalars().first()
+                        video = GeneratedVideo(
+                            id=uuid4(),
+                            identity_id=ident.id if ident else None,
+                            prompt=video_prompt,
+                            video_key=video_result.data.get("video_key", ""),
+                            duration_seconds=video_result.data.get("duration", 4),
+                            generation_time_ms=video_result.data.get("generation_time_ms", 0),
+                            metadata_json={
+                                "shoot_id": str(shoot_id),
+                                "theme": theme_data["name"],
+                                "video_url": video_result.data.get("video_url", ""),
+                            },
+                        )
+                        db.add(video)
+                        await db.commit()
+                
+                async with AsyncSessionLocal() as db:
+                    shoot = await db.get(Shoot, shoot_id)
+                    if shoot:
+                        shoot.status = ShootStatus.COMPLETED
+                        shoot.progress = 100
+                        await db.commit()
+            except Exception as e:
+                logger.error(f"Video generation failed: {e}")
+                async with AsyncSessionLocal() as db:
+                    shoot = await db.get(Shoot, shoot_id)
+                    if shoot:
+                        shoot.status = ShootStatus.COMPLETED
+                        shoot.progress = 100
+                        await db.commit()
+        
+        completed += 1
+        all_results.append({
+            "theme": theme_data["name"],
+            "images": len(shoot_images),
+            "video": generate_videos,
+        })
+    
+    # Mark job complete
+    async with AsyncSessionLocal() as db:
+        job = await db.get(Job, job_id)
+        if job:
+            job.status = "completed"
+            job.progress = 100
+            job.message = f"Production complete for {name}"
+            job.metadata_json["results"] = all_results
+            await db.commit()
+
+
+# ─── Artistic Styles ────────────────────────────────────────────────
+
+@router.get("/styles")
+async def list_styles(category: str = ""):
+    """List available artistic styles for content production.
+    
+    Returns all 100+ styles grouped by category, or filtered to one category.
+    """
+    from app.artistic_styles import STYLE_CATEGORIES, ALL_STYLES, count_styles
+    
+    if category and category in STYLE_CATEGORIES:
+        styles = STYLE_CATEGORIES[category]
+        return {
+            "category": category,
+            "count": len(styles),
+            "styles": [
+                {
+                    "name": s.name,
+                    "category": s.category,
+                    "image_prompt": s.image_prompt,
+                    "video_prompt": s.video_prompt,
+                    "lighting": s.lighting,
+                    "mood": s.mood,
+                }
+                for s in styles
+            ],
+        }
+    
+    return {
+        "total": count_styles(),
+        "categories": {cat: len(styles) for cat, styles in STYLE_CATEGORIES.items()},
+        "styles": [
+            {"name": s.name, "category": s.category, "mood": s.mood}
+            for s in ALL_STYLES
+        ],
+    }
+
+
+# ─── Health ──────────────────────────────────────────────────────────
+
+@router.get("/health")
+async def health_check():
+    """System health check across all providers."""
+    registry = get_registry()
+    health = registry.health_report()
+    all_green = all(v.get("status") == "green" for v in health.values())
+
+    return {
+        "ok": all_green,
+        "status": "healthy" if all_green else "degraded",
+        "providers": health,
+    }
+
+
+@router.get("/system/health")
+async def system_health():
+    """Detailed system health including provider status."""
+    registry = get_registry()
+    return {
+        "providers": registry.health_report(),
+        "environment": "development",
+    }

@@ -7,6 +7,8 @@ import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from pathlib import Path
 import structlog
 
 from app.config import get_settings
@@ -56,6 +58,90 @@ app.add_middleware(
 
 app.include_router(router, prefix="/api/v1")
 app.include_router(jobs_router, prefix="/api/v1")
+
+# Avatar static files
+AVATARS_DIR = Path(__file__).parent.parent / "storage" / "avatars"
+
+
+@app.get("/api/v1/avatars/{filename}")
+async def serve_avatar(filename: str):
+    """Serve persona avatar images with identity-lock cache headers."""
+    file_path = AVATARS_DIR / filename
+    if not file_path.exists() or not file_path.is_file():
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Avatar not found")
+    return FileResponse(
+        file_path,
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": "no-cache, must-revalidate",
+            "X-Identity-Locked": "true",
+        },
+    )
+
+
+# Gallery images
+GALLERY_DIR = Path(__file__).parent.parent / "storage" / "gallery"
+
+
+@app.get("/api/v1/gallery/{filename}")
+async def serve_gallery(filename: str):
+    """Serve gallery variation images."""
+    file_path = GALLERY_DIR / filename
+    if not file_path.exists() or not file_path.is_file():
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Gallery image not found")
+    return FileResponse(
+        file_path,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "public, max-age=86400",
+            "X-Identity-Locked": "true",
+        },
+    )
+
+
+# Shoot images
+SHOOTS_DIR = Path(__file__).parent.parent / "storage" / "shoots"
+
+
+@app.get("/api/v1/shoots/{shoot_id}/images/{filename}")
+async def serve_shoot_image(shoot_id: str, filename: str):
+    """Serve photoshoot images."""
+    file_path = SHOOTS_DIR / shoot_id / filename
+    if not file_path.exists() or not file_path.is_file():
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Shoot image not found")
+    return FileResponse(
+        file_path,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+# Adult content images
+ADULT_DIR = Path(__file__).parent.parent / "storage" / "adult_content"
+
+
+@app.get("/api/v1/adult-content/{persona_id}/{filename}")
+async def serve_adult_content(persona_id: str, filename: str):
+    """Serve adult content images.
+    
+    Requires age verification cookie in production.
+    """
+    file_path = ADULT_DIR / persona_id / filename
+    if not file_path.exists() or not file_path.is_file():
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Content not found")
+    return FileResponse(
+        file_path,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Adult-Content": "true",
+            "X-Audit-Logged": "true",
+        },
+    )
 
 
 @app.get("/")

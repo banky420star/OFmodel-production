@@ -15,8 +15,10 @@ NOTE: sk-ws-* keys are valid DashScope pay-as-you-go keys.
 
 from __future__ import annotations
 import asyncio
+import base64
 import os
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -37,15 +39,13 @@ DASHSCOPE_BASE = DASHSCOPE_BASES[0]
 TASK_SUBMIT_URL = f"{DASHSCOPE_BASE}/api/v1/services/aigc/video-generation/video-synthesis"
 TASK_STATUS_URL = f"{DASHSCOPE_BASE}/api/v1/tasks"
 
-# Models
-# International endpoint uses HappyHorse video models
-# China endpoint uses Wan models
-# This key works on the international endpoint
-WAN_T2V_MODEL = "happyhorse-1.1-t2v"     # Text-to-video (international)
-WAN_I2V_MODEL = "happyhorse-1.1-i2v"     # Image-to-video (international)
-# China-only alternatives (require China endpoint key):
-# WAN_T2V_MODEL = "wan2.1-t2v-t214p"
-# WAN_I2V_MODEL = "wan2.1-i2v-t214p"
+# Models — Wan 2.7 (latest, supports 1080P, multi-shot, audio)
+# API docs: https://www.alibabacloud.com/help/en/model-studio/text-to-video-api-reference
+WAN_T2V_MODEL = "wan2.7-t2v-2026-06-12"  # Text-to-video (latest)
+WAN_I2V_MODEL = "wan2.7-i2v-2026-04-25"  # Image-to-video (latest)
+# Fallback models (older)
+WAN_T2V_MODEL_FALLBACK = "wan2.1-t2v-t214p"
+WAN_I2V_MODEL_FALLBACK = "wan2.1-i2v-t214p"
 
 
 class DashScopeWanProvider(VideoProvider):
@@ -88,8 +88,22 @@ class DashScopeWanProvider(VideoProvider):
         duration: float = 4.0,
         width: int = 1280,
         height: int = 720,
+        resolution: str = "720P",
+        audio_url: str = "",
+        negative_prompt: str = "",
+        multi_shot: bool = False,
     ) -> ProviderResult:
-        """Generate video from text prompt."""
+        """Generate video from text prompt.
+
+        Args:
+            prompt: Text description of the video.
+            duration: Duration in seconds (3-15).
+            width/height: Output dimensions.
+            resolution: "720P" or "1080P".
+            audio_url: Optional URL of audio to accompany the video.
+            negative_prompt: Elements to exclude.
+            multi_shot: If True, model interprets prompt as multi-shot narrative.
+        """
         start = time.monotonic()
 
         if not self._api_key:
@@ -110,20 +124,26 @@ class DashScopeWanProvider(VideoProvider):
             else:
                 ratio = "1:1"
 
-            # Clamp duration to model limits
-            dur_sec = max(2, min(15, int(duration)))
+            # Clamp duration to model limits (3-15s for Wan 2.7)
+            dur_sec = max(3, min(15, int(duration)))
+
+            input_data = {"prompt": prompt}
+            if audio_url:
+                input_data["audio_url"] = audio_url
+            if negative_prompt:
+                input_data["negative_prompt"] = negative_prompt
+
+            params = {
+                "resolution": resolution,
+                "ratio": ratio,
+                "duration": dur_sec,
+                "prompt_extend": True,
+            }
 
             payload = {
                 "model": WAN_T2V_MODEL,
-                "input": {
-                    "prompt": prompt,
-                },
-                "parameters": {
-                    "resolution": "720P",
-                    "ratio": ratio,
-                    "duration": dur_sec,
-                    "prompt_extend": True,
-                },
+                "input": input_data,
+                "parameters": params,
             }
 
             logger.info(
@@ -133,34 +153,10 @@ class DashScopeWanProvider(VideoProvider):
                 duration=dur_sec,
             )
 
-            # Try multiple DashScope endpoints
-            last_error = None
-            for base in DASHSCOPE_BASES:
-                url = f"{base}/api/v1/services/aigc/video-generation/video-synthesis"
-                try:
-                    resp = await client.post(url, json=payload, headers=self._headers())
-                    if resp.status_code == 200:
-                        break
-                    elif resp.status_code == 401:
-                        last_error = resp
-                        continue  # Try next endpoint
-                    else:
-                        resp.raise_for_status()
-                except httpx.HTTPStatusError:
-                    if resp.status_code == 401:
-                        last_error = resp
-                        continue
-                    raise
-            else:
-                # All endpoints returned 401
-                if last_error:
-                    err = last_error.json().get("message", str(last_error))
-                    return ProviderResult(
-                        success=False,
-                        error=f"DashScope 401: {err}. Check that your WAN_API_KEY has 'All' permissions (not Custom) and that Wan video models are activated in the Model Square.",
-                        provider=self._provider,
-                        latency_ms=(time.monotonic() - start) * 1000,
-                    )
+            # Submit to DashScope API
+            resp = await client.post(
+                TASK_SUBMIT_URL, json=payload, headers=self._headers()
+            )
             resp.raise_for_status()
             task_data = resp.json()
 
@@ -182,7 +178,14 @@ class DashScopeWanProvider(VideoProvider):
             result = await self._poll_task(task_id)
             elapsed_ms = (time.monotonic() - start) * 1000
 
-            if result:
+            if result and result.get("_failed"):
+                return ProviderResult(
+                    success=False,
+                    error=f"DashScope task failed: {result.get('message', 'unknown')} (code: {result.get('code', '')})",
+                    provider=self._provider,
+                    latency_ms=elapsed_ms,
+                )
+            elif result:
                 video_url = self._extract_video_url(result)
                 return ProviderResult(
                     success=True,
@@ -245,8 +248,18 @@ class DashScopeWanProvider(VideoProvider):
         prompt: str = "",
         duration: float = 4.0,
         fps: int = 24,
+        resolution: str = "720P",
+        negative_prompt: str = "",
     ) -> ProviderResult:
-        """Generate video from a source image + motion prompt."""
+        """Generate video from a source image + motion prompt.
+
+        Args:
+            image_key: URL or path to the source image.
+            prompt: Motion/style description.
+            duration: Duration in seconds (2-15).
+            resolution: "720P" or "1080P".
+            negative_prompt: Elements to exclude.
+        """
         start = time.monotonic()
 
         if not self._api_key:
@@ -261,16 +274,50 @@ class DashScopeWanProvider(VideoProvider):
 
             dur_sec = max(2, min(15, int(duration)))
 
+            # Convert local file path to base64 data URI if needed
+            media_url = image_key
+            if not image_key.startswith("http") and not image_key.startswith("data:"):
+                # Local file path — resolve relative to API root
+                local_path = Path("/Users/bank/Downloads/Gemma_Local_Agent_v3_MODEL_FIX/apps/api") / image_key
+                if local_path.exists():
+                    img_bytes = local_path.read_bytes()
+                    # Resize large images to reduce base64 payload
+                    if len(img_bytes) > 500_000:  # > 500KB
+                        try:
+                            from PIL import Image
+                            import io
+                            img = Image.open(io.BytesIO(img_bytes))
+                            img.thumbnail((720, 1280), Image.LANCZOS)
+                            buf = io.BytesIO()
+                            img.save(buf, format="JPEG", quality=85)
+                            img_bytes = buf.getvalue()
+                        except ImportError:
+                            pass  # Use original if PIL not available
+                    ext = local_path.suffix.lstrip(".") or "png"
+                    b64 = base64.b64encode(img_bytes).decode()
+                    media_url = f"data:image/{ext};base64,{b64}"
+                    logger.info("i2v_image_encoded", path=str(local_path), size=len(img_bytes))
+
+            # Wan 2.7 i2v uses media as an array of media objects
+            input_data = {
+                "prompt": prompt or "subtle natural motion, gentle movement",
+                "media": [
+                    {
+                        "type": "first_frame",
+                        "url": media_url,
+                    }
+                ],
+            }
+            if negative_prompt:
+                input_data["negative_prompt"] = negative_prompt
+
             payload = {
                 "model": WAN_I2V_MODEL,
-                "input": {
-                    "image_url": image_key,
-                    "prompt": prompt or "subtle natural motion, gentle movement",
-                },
+                "input": input_data,
                 "parameters": {
-                    "resolution": "720P",
-                    "ratio": "9:16",
+                    "resolution": resolution,
                     "duration": dur_sec,
+                    "prompt_extend": True,
                 },
             }
 
@@ -304,7 +351,14 @@ class DashScopeWanProvider(VideoProvider):
             result = await self._poll_task(task_id)
             elapsed_ms = (time.monotonic() - start) * 1000
 
-            if result:
+            if result and result.get("_failed"):
+                return ProviderResult(
+                    success=False,
+                    error=f"DashScope task failed: {result.get('message', 'unknown')}",
+                    provider=self._provider,
+                    latency_ms=elapsed_ms,
+                )
+            elif result:
                 video_url = self._extract_video_url(result)
                 return ProviderResult(
                     success=True,
@@ -399,7 +453,8 @@ class DashScopeWanProvider(VideoProvider):
                             code=code,
                             message=msg,
                         )
-                        return None
+                        # Return a special dict so caller knows it failed
+                        return {"_failed": True, "message": msg, "code": code}
                     # else: PENDING or RUNNING — keep polling
 
             except Exception as e:
