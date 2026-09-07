@@ -171,6 +171,18 @@ export const massMessage = (personaId: string, messageType: string, fanIds?: str
     }),
   });
 
+// Mailboxes (per-persona AI mailboxes)
+export const listMailboxes = () => apiFetch('/mailboxes');
+
+export const getMailbox = (personaId: string) => apiFetch(`/mailboxes/${personaId}`);
+
+export const sendAsPersona = (personaId: string, fanId: string, content: string) =>
+  apiFetch(`/mailboxes/${personaId}/send`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ fan_id: fanId, content }),
+  });
+
 export const getFanAnalytics = (personaId?: string) => {
   const qs = personaId ? `?persona_id=${personaId}` : '';
   return apiFetch(`/fans/analytics${qs}`);

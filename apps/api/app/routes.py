@@ -2035,6 +2035,202 @@ async def fan_analytics(
     }
 
 
+# ─── Mailboxes (Per-Persona AI Mailboxes) ─────────────────────────
+
+@router.get("/mailboxes")
+async def list_mailboxes(db: AsyncSession = Depends(get_db)):
+    """List all persona mailboxes with stats."""
+    from app.models import Fan, ChatMessage
+
+    personas_result = await db.execute(select(Persona).order_by(Persona.created_at.desc()))
+    personas = personas_result.scalars().all()
+
+    mailboxes = []
+    for p in personas:
+        # Fan count for this persona
+        fans_q = select(Fan).where(Fan.persona_id == p.id)
+        fans_result = await db.execute(fans_q)
+        fans = fans_result.scalars().all()
+
+        # Message count
+        msgs_q = select(func.count()).where(ChatMessage.persona_id == p.id)
+        msgs_count = (await db.execute(msgs_q)).scalar() or 0
+
+        # Unread (inbound messages newer than last outbound)
+        last_outbound_q = (
+            select(func.max(ChatMessage.created_at))
+            .where(ChatMessage.persona_id == p.id, ChatMessage.direction == "outbound")
+        )
+        last_outbound = (await db.execute(last_outbound_q)).scalar()
+
+        if last_outbound:
+            unread_q = (
+                select(func.count()).where(
+                    ChatMessage.persona_id == p.id,
+                    ChatMessage.direction == "inbound",
+                    ChatMessage.created_at > last_outbound,
+                )
+            )
+            unread = (await db.execute(unread_q)).scalar() or 0
+        else:
+            # All inbound are unread if no outbound yet
+            unread_q = (
+                select(func.count()).where(
+                    ChatMessage.persona_id == p.id,
+                    ChatMessage.direction == "inbound",
+                )
+            )
+            unread = (await db.execute(unread_q)).scalar() or 0
+
+        # Revenue from this persona's fans
+        revenue = sum(f.total_spent or 0 for f in fans)
+
+        # Last message time
+        last_msg_q = (
+            select(func.max(ChatMessage.created_at))
+            .where(ChatMessage.persona_id == p.id)
+        )
+        last_msg = (await db.execute(last_msg_q)).scalar()
+
+        mailboxes.append({
+            "persona_id": str(p.id),
+            "persona_name": p.name,
+            "avatar_url": p.avatar_url or "",
+            "brand": p.brand or "",
+            "status": p.status.value if hasattr(p.status, 'value') else str(p.status),
+            "fan_count": len(fans),
+            "message_count": msgs_count,
+            "unread_count": unread,
+            "revenue": round(revenue, 2),
+            "last_message_at": last_msg.isoformat() if last_msg else None,
+        })
+
+    return mailboxes
+
+
+@router.get("/mailboxes/{persona_id}")
+async def get_mailbox(persona_id: UUID, db: AsyncSession = Depends(get_db)):
+    """Get a specific persona's mailbox with fan threads."""
+    from app.models import Fan, ChatMessage
+
+    persona = await db.get(Persona, persona_id)
+    if not persona:
+        raise HTTPException(404, "Persona not found")
+
+    # Get all fans for this persona
+    fans_q = select(Fan).where(Fan.persona_id == persona_id).order_by(Fan.total_spent.desc())
+    fans_result = await db.execute(fans_q)
+    fans = fans_result.scalars().all()
+
+    # Build thread list: for each fan, get their latest message + unread count
+    threads = []
+    for fan in fans:
+        # Latest message
+        latest_q = (
+            select(ChatMessage)
+            .where(ChatMessage.fan_id == fan.id)
+            .order_by(ChatMessage.created_at.desc())
+            .limit(1)
+        )
+        latest_result = await db.execute(latest_q)
+        latest = latest_result.scalar_one_or_none()
+
+        # Unread inbound messages for this fan
+        last_outbound_q = (
+            select(func.max(ChatMessage.created_at))
+            .where(ChatMessage.fan_id == fan.id, ChatMessage.direction == "outbound")
+        )
+        last_outbound = (await db.execute(last_outbound_q)).scalar()
+
+        if last_outbound:
+            unread_q = (
+                select(func.count()).where(
+                    ChatMessage.fan_id == fan.id,
+                    ChatMessage.direction == "inbound",
+                    ChatMessage.created_at > last_outbound,
+                )
+            )
+        else:
+            unread_q = (
+                select(func.count()).where(
+                    ChatMessage.fan_id == fan.id,
+                    ChatMessage.direction == "inbound",
+                )
+            )
+        unread = (await db.execute(unread_q)).scalar() or 0
+
+        threads.append({
+            "fan_id": str(fan.id),
+            "username": fan.username,
+            "display_name": fan.display_name,
+            "platform": fan.platform,
+            "subscription_tier": fan.subscription_tier,
+            "total_spent": fan.total_spent or 0,
+            "fan_score": fan.fan_score or 0,
+            "tags": fan.tags or [],
+            "last_message": {
+                "content": latest.content if latest else "",
+                "direction": latest.direction if latest else "",
+                "is_ai_generated": latest.is_ai_generated if latest else False,
+                "created_at": latest.created_at.isoformat() if latest and latest.created_at else None,
+            } if latest else None,
+            "unread_count": unread,
+        })
+
+    # Sort threads: unread first, then by last message time
+    def _sort_key(t):
+        unread = -t["unread_count"]
+        lm = t.get("last_message")
+        ts = lm.get("created_at", "") if lm else ""
+        return (unread, ts or "")
+    threads.sort(key=_sort_key)
+
+    return {
+        "persona_id": str(persona_id),
+        "persona_name": persona.name,
+        "avatar_url": persona.avatar_url or "",
+        "brand": persona.brand or "",
+        "total_fans": len(fans),
+        "total_revenue": round(sum(f.total_spent or 0 for f in fans), 2),
+        "threads": threads,
+    }
+
+
+@router.post("/mailboxes/{persona_id}/send")
+async def send_as_persona(
+    persona_id: UUID,
+    fan_id: str = Query(...),
+    content: str = Query(...),
+    message_type: str = Query("text"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Send a message as the persona to a fan (operator override)."""
+    from app.models import Fan, ChatMessage
+
+    persona = await db.get(Persona, persona_id)
+    if not persona:
+        raise HTTPException(404, "Persona not found")
+
+    fan = await db.get(Fan, UUID(fan_id))
+    if not fan or fan.persona_id != persona_id:
+        raise HTTPException(404, "Fan not found in this persona's mailbox")
+
+    msg = ChatMessage(
+        fan_id=fan.id,
+        persona_id=persona_id,
+        direction="outbound",
+        content=content,
+        message_type=message_type,
+        is_ai_generated=False,
+    )
+    db.add(msg)
+    fan.messages_received = (fan.messages_received or 0) + 1
+    fan.last_message_at = datetime.now(timezone.utc)
+    await db.commit()
+
+    return {"status": "sent", "message_id": str(msg.id)}
+
+
 @router.get("/system/health")
 async def system_health():
     """Detailed system health including provider status."""

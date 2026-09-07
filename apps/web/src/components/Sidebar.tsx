@@ -64,6 +64,7 @@ export default function Sidebar() {
     { label: 'Models', href: '/models', icon: icons.models },
     { label: 'Production', href: '/production', icon: icons.production, badge: shootCount },
     { label: 'Chat', href: '/chat', icon: icons.chat },
+    { label: 'Mailboxes', href: '/mailbox', icon: icon(<><rect width="20" height="14" x="2" y="5" rx="2"/><path d="M22 5v14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></>) },
     { label: 'Calendar', href: '/calendar', icon: icons.calendar },
     { label: 'Analytics', href: '/analytics', icon: icons.analytics },
   ]
