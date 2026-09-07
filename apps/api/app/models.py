@@ -473,3 +473,40 @@ class ChatMessage(Base):
     created_at = Column(DateTime(timezone=True), default=utcnow)
 
     fan = relationship("Fan", back_populates="messages")
+
+
+# ─── Social Accounts (Platform Signup + Approval) ──────────────────────
+
+class SocialAccount(Base):
+    """A social media account for a persona — requires operator approval before going live."""
+    __tablename__ = "social_accounts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    persona_id = Column(UUID(as_uuid=True), ForeignKey("personas.id", ondelete="CASCADE"), nullable=False)
+    platform = Column(String(32), nullable=False)  # instagram, facebook, onlyfans, tiktok, twitter, fanvue, fansly
+    username = Column(String(128), nullable=False)
+    display_name = Column(String(256), default="")
+    email = Column(String(256), default="")  # signup email (encrypted at rest in production)
+    password_hash = Column(String(512), default="")  # hashed password
+    profile_url = Column(String(512), default="")
+    bio = Column(Text, default="")
+    status = Column(String(32), default="draft")  # draft, pending_approval, approved, active, rejected, suspended
+    approval_notes = Column(Text, default="")  # operator notes on approval/rejection
+    approved_by = Column(String(128), default="")  # operator who approved
+    approved_at = Column(DateTime(timezone=True), nullable=True)
+    rejected_at = Column(DateTime(timezone=True), nullable=True)
+    rejection_reason = Column(Text, default="")
+    followers = Column(Integer, default=0)
+    following = Column(Integer, default=0)
+    posts_count = Column(Integer, default=0)
+    api_connected = Column(Boolean, default=False)  # whether API access is set up
+    api_token = Column(String(512), default="")  # platform API token
+    metadata_json = Column(JSON, default=dict)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    persona = relationship("Persona", back_populates="social_accounts")
+
+
+# Add social_accounts relationship to Persona
+Persona.social_accounts = relationship("SocialAccount", back_populates="persona", cascade="all, delete-orphan")

@@ -2231,6 +2231,222 @@ async def send_as_persona(
     return {"status": "sent", "message_id": str(msg.id)}
 
 
+# ─── Social Accounts (Platform Signup + Approval) ────────────────────
+
+@router.get("/social-accounts")
+async def list_social_accounts(
+    persona_id: str | None = None,
+    platform: str | None = None,
+    status: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """List social media accounts across all personas with filtering."""
+    from app.models import SocialAccount
+    q = select(SocialAccount).order_by(SocialAccount.created_at.desc())
+    if persona_id:
+        q = q.where(SocialAccount.persona_id == persona_id)
+    if platform:
+        q = q.where(SocialAccount.platform == platform)
+    if status:
+        q = q.where(SocialAccount.status == status)
+    result = await db.execute(q)
+    accounts = result.scalars().all()
+
+    # Get persona names
+    persona_map = {}
+    personas_result = await db.execute(select(Persona))
+    for p in personas_result.scalars().all():
+        persona_map[str(p.id)] = p.name
+
+    return [
+        {
+            "id": str(a.id),
+            "persona_id": str(a.persona_id),
+            "persona_name": persona_map.get(str(a.persona_id), "Unknown"),
+            "platform": a.platform,
+            "username": a.username,
+            "display_name": a.display_name,
+            "email": a.email,
+            "profile_url": a.profile_url,
+            "bio": a.bio,
+            "status": a.status,
+            "approval_notes": a.approval_notes,
+            "approved_by": a.approved_by,
+            "approved_at": a.approved_at.isoformat() if a.approved_at else None,
+            "rejected_at": a.rejected_at.isoformat() if a.rejected_at else None,
+            "rejection_reason": a.rejection_reason,
+            "followers": a.followers or 0,
+            "following": a.following or 0,
+            "posts_count": a.posts_count or 0,
+            "api_connected": a.api_connected or False,
+            "created_at": a.created_at.isoformat() if a.created_at else None,
+        }
+        for a in accounts
+    ]
+
+
+@router.post("/social-accounts")
+async def request_social_account(
+    persona_id: str = Query(...),
+    platform: str = Query(...),
+    username: str = Query(...),
+    display_name: str = Query(""),
+    email: str = Query(""),
+    bio: str = Query(""),
+    db: AsyncSession = Depends(get_db),
+):
+    """Request a new social media account for a persona. Goes to pending_approval."""
+    from app.models import SocialAccount
+
+    persona = await db.get(Persona, UUID(persona_id))
+    if not persona:
+        raise HTTPException(404, "Persona not found")
+
+    # Check for duplicate
+    existing = await db.execute(
+        select(SocialAccount).where(
+            SocialAccount.persona_id == UUID(persona_id),
+            SocialAccount.platform == platform,
+            SocialAccount.username == username,
+        )
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(409, f"Account @{username} on {platform} already exists for this persona")
+
+    account = SocialAccount(
+        id=uuid4(),
+        persona_id=UUID(persona_id),
+        platform=platform,
+        username=username,
+        display_name=display_name or username,
+        email=email,
+        bio=bio or f"{persona.name} — {persona.brand or 'content creator'}",
+        status="pending_approval",
+    )
+    db.add(account)
+    await db.commit()
+    await db.refresh(account)
+
+    return {
+        "id": str(account.id),
+        "status": account.status,
+        "message": f"Account request submitted for @{username} on {platform}. Awaiting operator approval.",
+    }
+
+
+@router.post("/social-accounts/{account_id}/approve")
+async def approve_social_account(
+    account_id: UUID,
+    notes: str = Query(""),
+    operator: str = Query("admin"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Approve a pending social account request."""
+    from app.models import SocialAccount
+
+    account = await db.get(SocialAccount, account_id)
+    if not account:
+        raise HTTPException(404, "Account not found")
+    if account.status != "pending_approval":
+        raise HTTPException(400, f"Account is '{account.status}', not pending approval")
+
+    account.status = "approved"
+    account.approval_notes = notes
+    account.approved_by = operator
+    account.approved_at = datetime.now(timezone.utc)
+    await db.commit()
+
+    return {
+        "status": "approved",
+        "account_id": str(account_id),
+        "platform": account.platform,
+        "username": account.username,
+    }
+
+
+@router.post("/social-accounts/{account_id}/reject")
+async def reject_social_account(
+    account_id: UUID,
+    reason: str = Query(...),
+    operator: str = Query("admin"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Reject a pending social account request."""
+    from app.models import SocialAccount
+
+    account = await db.get(SocialAccount, account_id)
+    if not account:
+        raise HTTPException(404, "Account not found")
+    if account.status != "pending_approval":
+        raise HTTPException(400, f"Account is '{account.status}', not pending approval")
+
+    account.status = "rejected"
+    account.rejection_reason = reason
+    account.rejected_at = datetime.now(timezone.utc)
+    await db.commit()
+
+    return {
+        "status": "rejected",
+        "account_id": str(account_id),
+        "reason": reason,
+    }
+
+
+@router.post("/social-accounts/{account_id}/activate")
+async def activate_social_account(
+    account_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Activate an approved account (set live)."""
+    from app.models import SocialAccount
+
+    account = await db.get(SocialAccount, account_id)
+    if not account:
+        raise HTTPException(404, "Account not found")
+    if account.status != "approved":
+        raise HTTPException(400, f"Account is '{account.status}', must be approved first")
+
+    account.status = "active"
+    await db.commit()
+
+    return {"status": "active", "account_id": str(account_id)}
+
+
+@router.get("/personas/{persona_id}/social-accounts")
+async def list_persona_social_accounts(
+    persona_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """List all social accounts for a specific persona."""
+    from app.models import SocialAccount
+
+    persona = await db.get(Persona, persona_id)
+    if not persona:
+        raise HTTPException(404, "Persona not found")
+
+    result = await db.execute(
+        select(SocialAccount)
+        .where(SocialAccount.persona_id == persona_id)
+        .order_by(SocialAccount.created_at.desc())
+    )
+    accounts = result.scalars().all()
+
+    return [
+        {
+            "id": str(a.id),
+            "platform": a.platform,
+            "username": a.username,
+            "display_name": a.display_name,
+            "status": a.status,
+            "followers": a.followers or 0,
+            "posts_count": a.posts_count or 0,
+            "api_connected": a.api_connected or False,
+            "created_at": a.created_at.isoformat() if a.created_at else None,
+        }
+        for a in accounts
+    ]
+
+
 @router.get("/system/health")
 async def system_health():
     """Detailed system health including provider status."""

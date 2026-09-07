@@ -187,3 +187,54 @@ export const getFanAnalytics = (personaId?: string) => {
   const qs = personaId ? `?persona_id=${personaId}` : '';
   return apiFetch(`/fans/analytics${qs}`);
 };
+
+// Social Accounts (platform signup + approval)
+export const listSocialAccounts = (params?: { persona_id?: string; platform?: string; status?: string }) => {
+  const qs = new URLSearchParams();
+  if (params?.persona_id) qs.set('persona_id', params.persona_id);
+  if (params?.platform) qs.set('platform', params.platform);
+  if (params?.status) qs.set('status', params.status);
+  const q = qs.toString();
+  return apiFetch(`/social-accounts${q ? '?' + q : ''}`);
+};
+
+export const requestSocialAccount = (params: {
+  persona_id: string; platform: string; username: string;
+  display_name?: string; email?: string; bio?: string;
+}) => {
+  const qs = new URLSearchParams(params);
+  return apiFetch('/social-accounts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: qs,
+  });
+};
+
+export const approveSocialAccount = (accountId: string, notes?: string) => {
+  const qs = new URLSearchParams();
+  if (notes) qs.set('notes', notes);
+  return apiFetch(`/social-accounts/${accountId}/approve`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: qs,
+  });
+};
+
+export const rejectSocialAccount = (accountId: string, reason: string) => {
+  const qs = new URLSearchParams({ reason });
+  return apiFetch(`/social-accounts/${accountId}/reject`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: qs,
+  });
+};
+
+export const activateSocialAccount = (accountId: string) =>
+  apiFetch(`/social-accounts/${accountId}/activate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(),
+  });
+
+export const listPersonaSocialAccounts = (personaId: string) =>
+  apiFetch(`/personas/${personaId}/social-accounts`);
