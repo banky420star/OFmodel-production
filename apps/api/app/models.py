@@ -428,8 +428,8 @@ class Fan(Base):
     """A fan/subscriber on the creator's platform."""
     __tablename__ = "fans"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    persona_id = Column(UUID(as_uuid=True), ForeignKey("personas.id", ondelete="CASCADE"), nullable=False)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    persona_id = Column(String(36), ForeignKey("personas.id", ondelete="CASCADE"), nullable=False)
     username = Column(String(128), nullable=False)
     display_name = Column(String(256), default="")
     platform = Column(String(32), default="onlyfans")  # onlyfans, fanvue, fansly, custom
@@ -457,9 +457,9 @@ class ChatMessage(Base):
     """A message in the fan chat system."""
     __tablename__ = "chat_messages"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    fan_id = Column(UUID(as_uuid=True), ForeignKey("fans.id", ondelete="CASCADE"), nullable=False)
-    persona_id = Column(UUID(as_uuid=True), ForeignKey("personas.id", ondelete="CASCADE"), nullable=False)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    fan_id = Column(String(36), ForeignKey("fans.id", ondelete="CASCADE"), nullable=False)
+    persona_id = Column(String(36), ForeignKey("personas.id", ondelete="CASCADE"), nullable=False)
     direction = Column(String(16), nullable=False)  # inbound (fan→model), outbound (model→fan)
     content = Column(Text, nullable=False)
     message_type = Column(String(32), default="text")  # text, image, video, ppv, tip, system
@@ -489,8 +489,8 @@ class SocialAccount(Base):
     """
     __tablename__ = "social_accounts"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    persona_id = Column(UUID(as_uuid=True), ForeignKey("personas.id", ondelete="CASCADE"), nullable=False)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    persona_id = Column(String(36), ForeignKey("personas.id", ondelete="CASCADE"), nullable=False)
     platform = Column(String(32), nullable=False)  # instagram, facebook, onlyfans, tiktok, twitter, fanvue, fansly
     username = Column(String(128), nullable=False)
     display_name = Column(String(256), default="")

@@ -10,7 +10,7 @@ interface Fan {
   total_spent: number; ppv_purchases: number; tips_given: number
   messages_sent: number; messages_received: number
   fan_score: number; tags: string[]; last_active: string | null
-  last_message_at: string | null
+  last_message_at: string | null; created_at: string | null
 }
 
 interface ChatMsg {
@@ -200,8 +200,9 @@ export default function ChatPage() {
                 <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
                   {messages.length === 0 && (
                     <div style={{ textAlign: 'center', padding: 40, color: 'var(--text-muted)' }}>
-                      <p style={{ fontSize: 24, marginBottom: 8 }}>💬</p>
-                      <p>Start chatting with {selectedFan.display_name || selectedFan.username}</p>
+                      <div style={{ fontSize: 28, marginBottom: 8 }}>👋</div>
+                      <p style={{ fontSize: 14, fontWeight: 500, color: 'var(--text)', marginBottom: 4 }}>No messages yet</p>
+                      <p style={{ fontSize: 12 }}>Send a message to {selectedFan.display_name || selectedFan.username} to start the conversation</p>
                     </div>
                   )}
                   {messages.map(msg => (
@@ -233,8 +234,9 @@ export default function ChatPage() {
                   ))}
                   {sending && (
                     <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
-                      <div className="panel" style={{ padding: '10px 14px', borderRadius: 12 }}>
-                        <span className="pulse-dot" style={{ width: 6, height: 6 }} /> thinking...
+                      <div style={{ padding: '10px 14px', borderRadius: 12, background: 'var(--bg-card)', border: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span className="pulse-dot" style={{ width: 6, height: 6, background: 'var(--green)' }} />
+                        <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{selectedFan?.display_name || selectedFan?.username} is typing…</span>
                       </div>
                     </div>
                   )}
@@ -260,9 +262,10 @@ export default function ChatPage() {
               </>
             ) : (
               <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)' }}>
-                <div style={{ textAlign: 'center' }}>
-                  <p style={{ fontSize: 32, marginBottom: 12 }}>💬</p>
-                  <p style={{ fontSize: 14 }}>Select a fan to start chatting</p>
+                <div style={{ textAlign: 'center', maxWidth: 280 }}>
+                  <div style={{ fontSize: 36, marginBottom: 12 }}>💬</div>
+                  <p style={{ fontSize: 15, fontWeight: 600, color: 'var(--text)', marginBottom: 6 }}>Select a fan</p>
+                  <p style={{ fontSize: 13, lineHeight: 1.5 }}>Choose a fan from the list to view their conversation. AI auto-reply generates persona-consistent responses using Ollama.</p>
                 </div>
               </div>
             )}

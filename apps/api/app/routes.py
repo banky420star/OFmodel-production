@@ -9,9 +9,9 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, Form
 from pydantic import BaseModel
-from sqlalchemy import select, func
+from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -45,6 +45,53 @@ from app.workflows.content_flow import (
 from app.providers.registry import get_registry
 
 router = APIRouter(tags=["persona-studio"])
+
+
+# ─── Helpers ──────────────────────────────────────────────────────────
+
+async def find_fan(db: AsyncSession, fan_id: str):
+    """Find a fan by ID using raw SQL (ORM UUID type broken on Python 3.9 + SQLite)."""
+    result = await db.execute(
+        text("SELECT id, persona_id, username, display_name, platform, status, "
+             "subscription_tier, total_spent, ppv_purchases, tips_given, "
+             "messages_sent, messages_received, last_active, last_message_at, "
+             "fan_score, tags, notes, metadata_json, created_at, updated_at "
+             "FROM fans WHERE id = :fid"),
+        {"fid": fan_id},
+    )
+    row = result.fetchone()
+    if not row:
+        return None
+    from types import SimpleNamespace
+    cols = ["id","persona_id","username","display_name","platform","status",
+            "subscription_tier","total_spent","ppv_purchases","tips_given",
+            "messages_sent","messages_received","last_active","last_message_at",
+            "fan_score","tags","notes","metadata_json","created_at","updated_at"]
+    return SimpleNamespace(**dict(zip(cols, row)))
+
+
+async def query_fan_messages(db: AsyncSession, fan_id: str, limit: int = 50, direction: str = None):
+    """Query chat messages for a fan using raw SQL."""
+    where = "WHERE fan_id = :fid"
+    params = {"fid": fan_id, "limit": limit}
+    if direction:
+        where += " AND direction = :dir"
+        params["dir"] = direction
+    result = await db.execute(
+        text(f"SELECT id, fan_id, persona_id, direction, content, message_type, "
+             f"is_ai_generated, is_ppv, ppv_price, ppv_unlocked, sentiment, intent, "
+             f"metadata_json, created_at FROM chat_messages {where} "
+             f"ORDER BY created_at DESC LIMIT :limit"),
+        params,
+    )
+    from types import SimpleNamespace
+    msg_cols = ["id","fan_id","persona_id","direction","content","message_type",
+                "is_ai_generated","is_ppv","ppv_price","ppv_unlocked","sentiment",
+                "intent","metadata_json","created_at"]
+    rows = result.fetchall()
+    msgs = [SimpleNamespace(**dict(zip(msg_cols, r))) for r in rows]
+    msgs.reverse()
+    return msgs
 
 
 # ─── Dashboard (Phase 14) ────────────────────────────────────────────
@@ -1765,22 +1812,11 @@ async def list_fan_messages(
     db: AsyncSession = Depends(get_db),
 ):
     """Get chat history for a fan."""
-    from app.models import ChatMessage, Fan
-    fan_uuid = UUID(fan_id)
-    fan = await db.get(Fan, fan_uuid)
+    fan = await find_fan(db, fan_id)
     if not fan:
         raise HTTPException(404, "Fan not found")
     
-    q = (
-        select(ChatMessage)
-        .where(ChatMessage.fan_id == fan_uuid)
-        .order_by(ChatMessage.created_at.desc())
-        .limit(limit)
-    )
-    result = await db.execute(q)
-    messages = result.scalars().all()
-    messages.reverse()  # oldest first
-    
+    messages = await query_fan_messages(db, fan_id, limit)
     return [
         {
             "id": str(m.id),
@@ -1792,7 +1828,7 @@ async def list_fan_messages(
             "ppv_price": m.ppv_price,
             "sentiment": m.sentiment,
             "intent": m.intent,
-            "created_at": m.created_at.isoformat() if m.created_at else None,
+            "created_at": m.created_at.isoformat() if hasattr(m.created_at, 'isoformat') else str(m.created_at) if m.created_at else None,
         }
         for m in messages
     ]
@@ -1801,45 +1837,39 @@ async def list_fan_messages(
 @router.post("/fans/{fan_id}/reply")
 async def auto_reply(
     fan_id: str,
-    message: str = Query(...),
+    message: str = Form(...),
     db: AsyncSession = Depends(get_db),
 ):
     """Generate and send an AI reply to a fan message."""
-    from app.models import Fan, ChatMessage
     from app.chat_engine import generate_chat_reply
+    from uuid import uuid4
     
-    fan = await db.get(Fan, UUID(fan_id))
+    fan = await find_fan(db, fan_id)
     if not fan:
         raise HTTPException(404, "Fan not found")
     
-    persona = await db.get(Persona, fan.persona_id)
+    persona = await db.get(Persona, UUID(fan.persona_id) if isinstance(fan.persona_id, str) else fan.persona_id)
     if not persona:
         raise HTTPException(404, "Persona not found")
     
-    # Save inbound message
-    inbound = ChatMessage(
-        fan_id=fan.id,
-        persona_id=fan.persona_id,
-        direction="inbound",
-        content=message,
-        message_type="text",
+    # Save inbound message via raw SQL
+    msg_id = str(uuid4())
+    now = datetime.now(timezone.utc)
+    await db.execute(
+        text("INSERT INTO chat_messages (id, fan_id, persona_id, direction, content, message_type, created_at) "
+             "VALUES (:id, :fan_id, :persona_id, 'inbound', :content, 'text', :now)"),
+        {"id": msg_id, "fan_id": fan.id, "persona_id": fan.persona_id, "content": message, "now": now},
     )
-    db.add(inbound)
-    fan.messages_sent = (fan.messages_sent or 0) + 1
-    fan.last_message_at = datetime.now(timezone.utc)
+    # Update fan stats via raw SQL
+    new_sent = (fan.messages_sent or 0) + 1
+    await db.execute(
+        text("UPDATE fans SET messages_sent = :sent, last_message_at = :now WHERE id = :fid"),
+        {"sent": new_sent, "now": now, "fid": fan.id},
+    )
     
-    # Get conversation history
-    history_q = (
-        select(ChatMessage)
-        .where(ChatMessage.fan_id == fan.id)
-        .order_by(ChatMessage.created_at.desc())
-        .limit(10)
-    )
-    history_result = await db.execute(history_q)
-    history = [
-        {"direction": m.direction, "content": m.content}
-        for m in history_result.scalars().all()
-    ]
+    # Get conversation history via raw SQL
+    history_msgs = await query_fan_messages(db, fan_id, 10)
+    history = [{"direction": m.direction, "content": m.content} for m in history_msgs]
     history.reverse()
     
     # Calculate days since last active
@@ -1861,27 +1891,22 @@ async def auto_reply(
         days_since_last_active=days_since,
     )
     
-    # Save outbound message
-    outbound = ChatMessage(
-        fan_id=fan.id,
-        persona_id=fan.persona_id,
-        direction="outbound",
-        content=reply.text,
-        message_type="text",
-        is_ai_generated=True,
-        sentiment=reply.sentiment,
-        intent=reply.intent,
+    # Save outbound message via raw SQL
+    out_id = str(uuid4())
+    await db.execute(
+        text("INSERT INTO chat_messages (id, fan_id, persona_id, direction, content, message_type, "
+             "is_ai_generated, sentiment, intent, created_at) "
+             "VALUES (:id, :fan_id, :persona_id, 'outbound', :content, 'text', 1, :sentiment, :intent, :now)"),
+        {"id": out_id, "fan_id": fan.id, "persona_id": fan.persona_id, "content": reply.text,
+         "sentiment": reply.sentiment, "intent": reply.intent, "now": now},
     )
-    db.add(outbound)
-    fan.messages_received = (fan.messages_received or 0) + 1
-    
-    # Update fan score
+    # Update fan stats and score via raw SQL
+    new_received = (fan.messages_received or 0) + 1
     from app.chat_engine import _score_fan
-    fan.fan_score = _score_fan(
-        fan.total_spent or 0,
-        fan.ppv_purchases or 0,
-        fan.messages_sent or 0,
-        days_since,
+    new_score = _score_fan(fan.total_spent or 0, fan.ppv_purchases or 0, new_sent, days_since)
+    await db.execute(
+        text("UPDATE fans SET messages_received = :recv, fan_score = :score WHERE id = :fid"),
+        {"recv": new_received, "score": new_score, "fid": fan.id},
     )
     
     await db.commit()
@@ -1892,7 +1917,7 @@ async def auto_reply(
         "sentiment": reply.sentiment,
         "suggests_ppv": reply.suggests_ppv,
         "ppv_prompt": reply.ppv_prompt,
-        "fan_score": fan.fan_score,
+        "fan_score": new_score,
     }
 
 
@@ -1905,23 +1930,22 @@ async def send_ppv(
     db: AsyncSession = Depends(get_db),
 ):
     """Send a PPV message to a fan."""
-    from app.models import Fan, ChatMessage
+    from uuid import uuid4
     
-    fan = await db.get(Fan, UUID(fan_id))
+    fan = await find_fan(db, fan_id)
     if not fan:
         raise HTTPException(404, "Fan not found")
     
-    ppv_msg = ChatMessage(
-        fan_id=fan.id,
-        persona_id=fan.persona_id,
-        direction="outbound",
-        content=caption or "exclusive content 🔒",
-        message_type="ppv",
-        is_ppv=True,
-        ppv_price=price,
-        metadata_json={"content_key": content_key},
+    msg_id = str(uuid4())
+    now = datetime.now(timezone.utc)
+    await db.execute(
+        text("INSERT INTO chat_messages (id, fan_id, persona_id, direction, content, message_type, "
+             "is_ppv, ppv_price, metadata_json, created_at) "
+             "VALUES (:id, :fan_id, :persona_id, 'outbound', :content, 'ppv', 1, :price, :meta, :now)"),
+        {"id": msg_id, "fan_id": fan.id, "persona_id": fan.persona_id,
+         "content": caption or 'exclusive content', "price": price,
+         "meta": json.dumps({"content_key": content_key}), "now": now},
     )
-    db.add(ppv_msg)
     await db.commit()
     
     return {"status": "sent", "ppv_price": price, "fan": fan.username}
@@ -1936,43 +1960,43 @@ async def mass_message(
     db: AsyncSession = Depends(get_db),
 ):
     """Send a mass message to multiple fans."""
-    from app.models import Fan, ChatMessage
     from app.chat_engine import generate_mass_message
+    from uuid import uuid4
     
     persona = await db.get(Persona, persona_id)
     if not persona:
         raise HTTPException(404, "Persona not found")
     
-    # Get target fans
+    # Get target fans via raw SQL
     if fan_ids:
-        q = select(Fan).where(Fan.id.in_(fan_ids))
+        placeholders = ', '.join([':f' + str(i) for i in range(len(fan_ids))])
+        fan_params = {"f" + str(i): fid for i, fid in enumerate(fan_ids)}
+        fans_result = await db.execute(
+            text(f"SELECT id, display_name, username FROM fans WHERE id IN ({placeholders})"), fan_params)
     else:
-        q = select(Fan).where(Fan.persona_id == persona_id).where(Fan.status == "active")
+        fans_result = await db.execute(
+            text("SELECT id, display_name, username FROM fans WHERE persona_id = :pid AND status = 'active'"),
+            {"pid": persona_id})
+    fans = fans_result.fetchall()
     
-    result = await db.execute(q)
-    fans = result.scalars().all()
-    
+    now = datetime.now(timezone.utc)
     sent = 0
-    for fan in fans:
+    for fan_id_val, display_name, username in fans:
         msg_text = await generate_mass_message(
             persona_name=persona.name,
             brand=persona.brand or "lifestyle",
             personality=json.dumps(persona.personality) if persona.personality else "friendly",
             voice_style=persona.voice_style or "casual",
             message_type=message_type,
-            fan_name=fan.display_name or fan.username,
+            fan_name=display_name or username,
             custom_context=custom_message,
         )
-        
-        msg = ChatMessage(
-            fan_id=fan.id,
-            persona_id=persona_id,
-            direction="outbound",
-            content=msg_text,
-            message_type="text",
-            is_ai_generated=True,
+        msg_id = str(uuid4())
+        await db.execute(
+            text("INSERT INTO chat_messages (id, fan_id, persona_id, direction, content, message_type, is_ai_generated, created_at) "
+                 "VALUES (:id, :fan_id, :pid, 'outbound', :content, 'text', 1, :now)"),
+            {"id": msg_id, "fan_id": fan_id_val, "pid": persona_id, "content": msg_text, "now": now},
         )
-        db.add(msg)
         sent += 1
     
     await db.commit()
@@ -2102,7 +2126,7 @@ async def list_mailboxes(db: AsyncSession = Depends(get_db)):
             "message_count": msgs_count,
             "unread_count": unread,
             "revenue": round(revenue, 2),
-            "last_message_at": last_msg.isoformat() if last_msg else None,
+            "last_message_at": last_msg.isoformat() if hasattr(last_msg, 'isoformat') else str(last_msg) if last_msg else None,
         })
 
     return mailboxes
@@ -2172,7 +2196,7 @@ async def get_mailbox(persona_id: UUID, db: AsyncSession = Depends(get_db)):
                 "content": latest.content if latest else "",
                 "direction": latest.direction if latest else "",
                 "is_ai_generated": latest.is_ai_generated if latest else False,
-                "created_at": latest.created_at.isoformat() if latest and latest.created_at else None,
+                "created_at": (latest.created_at.isoformat() if hasattr(latest.created_at, 'isoformat') else str(latest.created_at)) if latest and latest.created_at else None,
             } if latest else None,
             "unread_count": unread,
         })
@@ -2205,30 +2229,30 @@ async def send_as_persona(
     db: AsyncSession = Depends(get_db),
 ):
     """Send a message as the persona to a fan (operator override)."""
-    from app.models import Fan, ChatMessage
+    from uuid import uuid4
 
     persona = await db.get(Persona, persona_id)
     if not persona:
         raise HTTPException(404, "Persona not found")
 
-    fan = await db.get(Fan, UUID(fan_id))
-    if not fan or fan.persona_id != persona_id:
+    fan = await find_fan(db, fan_id)
+    if not fan or str(fan.persona_id) != str(persona_id):
         raise HTTPException(404, "Fan not found in this persona's mailbox")
 
-    msg = ChatMessage(
-        fan_id=fan.id,
-        persona_id=persona_id,
-        direction="outbound",
-        content=content,
-        message_type=message_type,
-        is_ai_generated=False,
+    msg_id = str(uuid4())
+    now = datetime.now(timezone.utc)
+    await db.execute(
+        text("INSERT INTO chat_messages (id, fan_id, persona_id, direction, content, message_type, is_ai_generated, created_at) "
+             "VALUES (:id, :fan_id, :pid, 'outbound', :content, :mt, 0, :now)"),
+        {"id": msg_id, "fan_id": fan.id, "pid": persona_id, "content": content, "mt": message_type, "now": now},
     )
-    db.add(msg)
-    fan.messages_received = (fan.messages_received or 0) + 1
-    fan.last_message_at = datetime.now(timezone.utc)
+    await db.execute(
+        text("UPDATE fans SET messages_received = messages_received + 1, last_message_at = :now WHERE id = :fid"),
+        {"now": now, "fid": fan.id},
+    )
     await db.commit()
 
-    return {"status": "sent", "message_id": str(msg.id)}
+    return {"status": "sent", "message_id": msg_id}
 
 
 # ─── Social Accounts (Platform Signup + Approval) ────────────────────

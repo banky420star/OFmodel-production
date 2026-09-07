@@ -116,7 +116,7 @@ function ShootsTab({ id }: { id: string }) {
     setBusy(true)
     try {
       const shoot = await createShoot(id, { name: 'New Shoot', theme: 'lifestyle', image_count: 8 })
-      setData(prev => prev ? [shoot, ...prev] : [shoot])
+      setData((prev: any) => prev ? [shoot, ...prev] : [shoot])
     } finally { setBusy(false) }
   }
   if (loading) return <p className="muted-md">Loading…</p>
@@ -145,7 +145,7 @@ function ContentTab({ id, personaName }: { id: string; personaName: string }) {
     setBusy(true)
     try {
       const pack = await createPack(id, { name: `${personaName} Pack`, platform: 'instagram' })
-      setData(prev => prev ? [pack, ...prev] : [pack])
+      setData((prev: any) => prev ? [pack, ...prev] : [pack])
     } finally { setBusy(false) }
   }
   if (loading) return <p className="muted-md">Loading…</p>

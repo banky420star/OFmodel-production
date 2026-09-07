@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { getDashboardSummary, listVideos, autoProduce, listJobs, listPersonas } from '@/lib/api'
-import type { DashboardSummary, ShootDetail, PersonaResponse } from '@/lib/types'
+import type { DashboardSummary, ShootDetail, PersonaDetail } from '@/lib/types'
 import { Icons } from '@/lib/icons'
 import { StatusBadge } from '@/components/ui/StatusBadge'
 
@@ -36,10 +36,11 @@ export default function ProductionPage() {
   const [shoots, setShoots] = useState<ShootDetail[]>([])
   const [videos, setVideos] = useState<VideoItem[]>([])
   const [jobs, setJobs] = useState<JobItem[]>([])
-  const [personas, setPersonas] = useState<PersonaResponse[]>([])
+  const [personas, setPersonas] = useState<PersonaDetail[]>([])
   const [loading, setLoading] = useState(true)
   const [autoProducing, setAutoProducing] = useState<string | null>(null)
   const [selectedThemes, setSelectedThemes] = useState<string[]>(['lifestyle', 'fashion', 'swimwear'])
+  const [toast, setToast] = useState<{ msg: string; type: 'success' | 'error' } | null>(null)
 
   useEffect(() => {
     Promise.all([
@@ -85,9 +86,13 @@ export default function ProductionPage() {
         listJobs({ status: 'running' }).then((data: JobItem[]) => setJobs(data)).catch(() => {})
       }, 2000)
     } catch (e) {
-      console.error('Auto-produce failed:', e)
+      setToast({ msg: `Auto-produce failed: ${e instanceof Error ? e.message : 'Unknown error'}`, type: 'error' })
+      setTimeout(() => setToast(null), 5000)
     }
+    const personaName = personas.find(p => p.id === personaId)?.name || 'persona'
     setAutoProducing(null)
+    setToast({ msg: `Auto-produce started for ${personaName} — ${selectedThemes.length} themes`, type: 'success' })
+    setTimeout(() => setToast(null), 4000)
   }
 
   return (
@@ -346,6 +351,20 @@ export default function ProductionPage() {
           </section>
         )}
       </div>
+
+      {/* Toast notification */}
+      {toast && (
+        <div style={{
+          position: 'fixed', bottom: 24, right: 24, zIndex: 999,
+          padding: '12px 20px', borderRadius: 8, fontSize: 13, fontWeight: 500,
+          background: toast.type === 'success' ? 'var(--green)' : '#ef4444',
+          color: toast.type === 'success' ? '#0c0e12' : '#fff',
+          boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
+          animation: 'slideUp 0.3s ease',
+        }}>
+          {toast.type === 'success' ? '✓' : '✗'} {toast.msg}
+        </div>
+      )}
     </main>
   )
 }

@@ -49,8 +49,23 @@ export default function Dashboard() {
           <button className="mobile-menu" aria-label="Open menu">{Icons.menu}</button>
           <div className="crumb"><span>Persona Studio</span><b>/</b><strong>Overview</strong></div>
         </header>
-        <div className="content" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '60vh' }}>
-          <p style={{ color: 'var(--muted)' }}>Loading dashboard…</p>
+        <div className="content">
+          <section className="page-heading">
+            <div>
+              <p className="eyebrow" style={{ opacity: 0.4 }}>Loading</p>
+              <h1 style={{ opacity: 0.3, width: 260, height: 28, background: 'var(--bg-panel)', borderRadius: 6 }}>&nbsp;</h1>
+              <p style={{ opacity: 0.2, width: 360, height: 16, background: 'var(--bg-panel)', borderRadius: 4, marginTop: 8 }}>&nbsp;</p>
+            </div>
+          </section>
+          <section className="metrics-grid">
+            {[0,1,2,3].map(i => (
+              <article key={i} className="metric-card" style={{ opacity: 0.4 }}>
+                <div style={{ width: 100, height: 14, background: 'var(--bg-card)', borderRadius: 4 }}>&nbsp;</div>
+                <div style={{ width: 60, height: 28, background: 'var(--bg-card)', borderRadius: 4, marginTop: 4 }}>&nbsp;</div>
+                <div style={{ width: 120, height: 14, background: 'var(--bg-card)', borderRadius: 4, marginTop: 8 }}>&nbsp;</div>
+              </article>
+            ))}
+          </section>
         </div>
       </main>
     )
@@ -64,9 +79,11 @@ export default function Dashboard() {
           <div className="crumb"><span>Persona Studio</span><b>/</b><strong>Overview</strong></div>
         </header>
         <div className="content" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '60vh' }}>
-          <div style={{ textAlign: 'center' }}>
-            <p style={{ color: '#ef4444', marginBottom: 8 }}>Failed to load dashboard</p>
-            <p style={{ color: 'var(--muted)', fontSize: 13 }}>{error}</p>
+          <div style={{ textAlign: 'center', maxWidth: 360 }}>
+            <div style={{ fontSize: 32, marginBottom: 12 }}>⚠️</div>
+            <p style={{ color: 'var(--text)', fontWeight: 600, fontSize: 15, marginBottom: 6 }}>Could not reach the API</p>
+            <p style={{ color: 'var(--text-muted)', fontSize: 13, marginBottom: 16, lineHeight: 1.5 }}>{error}. Make sure the API server is running on port 8001.</p>
+            <button className="primary-button" onClick={() => { setLoading(true); setError(null); window.location.reload() }}>{Icons.activity} Retry</button>
           </div>
         </div>
       </main>
