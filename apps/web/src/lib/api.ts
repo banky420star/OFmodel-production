@@ -56,11 +56,6 @@ export const generateForecast = (personaId: string) =>
 export const getSchedule = (personaId: string) => apiFetch(`/personas/${personaId}/schedule`);
 export const generateSchedule = (personaId: string) =>
   apiFetch(`/personas/${personaId}/schedule/generate`, { method: 'POST' });
-export const smartSchedule = (personaId: string) =>
-  apiFetch(`/personas/${personaId}/schedule/smart`, { method: 'POST' });
-export const smartScheduleAll = () =>
-  apiFetch('/schedule/smart-all', { method: 'POST' });
-
 // Autopilot
 export const toggleAutopilot = (personaId: string, mode: string) =>
   apiFetch(`/personas/${personaId}/autopilot?mode=${mode}`, { method: 'POST' });
@@ -81,32 +76,7 @@ export const listJobs = (params?: { persona_id?: string; status?: string }) => {
   return apiFetch(`/jobs${q ? '?' + q : ''}`);
 };
 
-// Video Generation
-export const generateVideo = (personaId: string, params?: { prompt?: string; duration?: number }) => {
-  const qs = new URLSearchParams();
-  if (params?.prompt) qs.set('prompt', params.prompt);
-  if (params?.duration) qs.set('duration', String(params.duration));
-  const q = qs.toString();
-  return apiFetch(`/personas/${personaId}/generate-video${q ? '?' + q : ''}`, { method: 'POST' });
-};
-
-export const generateShootVideo = (shootId: string, params?: { shot_index?: number; prompt?: string; duration?: number }) => {
-  const qs = new URLSearchParams();
-  if (params?.shot_index !== undefined) qs.set('shot_index', String(params.shot_index));
-  if (params?.prompt) qs.set('prompt', params.prompt);
-  if (params?.duration) qs.set('duration', String(params.duration));
-  const q = qs.toString();
-  return apiFetch(`/shoots/${shootId}/generate-video${q ? '?' + q : ''}`, { method: 'POST' });
-};
-
 export const listVideos = (personaId: string) => apiFetch(`/personas/${personaId}/videos`);
-
-// Adult Content
-export const generateAdultContent = (personaId: string, data: { scene_prompt: string; content_type?: string }) =>
-  apiFetch(`/personas/${personaId}/adult-content`, { method: 'POST', body: JSON.stringify(data) });
-
-export const batchAdultContent = (personaId: string, data: { scenes: string[]; content_type?: string }) =>
-  apiFetch(`/personas/${personaId}/batch-adult-content`, { method: 'POST', body: JSON.stringify(data) });
 
 // Auto Production
 export const autoProduce = (personaId: string, params?: {
@@ -126,9 +96,6 @@ export const autoProduce = (personaId: string, params?: {
   return apiFetch(`/personas/${personaId}/auto-produce${q ? '?' + q : ''}`, { method: 'POST' });
 };
 
-// Health
-export const getHealth = () => apiFetch('/health');
-
 // Fan Chat
 export const listFans = (params?: { persona_id?: string; status?: string }) => {
   const qs = new URLSearchParams();
@@ -138,15 +105,6 @@ export const listFans = (params?: { persona_id?: string; status?: string }) => {
   return apiFetch(`/fans${q ? '?' + q : ''}`);
 };
 
-export const createFan = (personaId: string, username: string, displayName?: string) =>
-  apiFetch('/fans', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      persona_id: personaId, username, display_name: displayName || username,
-    }),
-  });
-
 export const listFanMessages = (fanId: string, limit = 50) =>
   apiFetch(`/fans/${fanId}/messages?limit=${limit}`);
 
@@ -155,24 +113,6 @@ export const autoReply = (fanId: string, message: string) =>
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ message }),
-  });
-
-export const sendPPV = (fanId: string, contentKey: string, price: number, caption?: string) =>
-  apiFetch(`/fans/${fanId}/ppv`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      content_key: contentKey, price: String(price), caption: caption || '',
-    }),
-  });
-
-export const massMessage = (personaId: string, messageType: string, fanIds?: string[]) =>
-  apiFetch('/fans/mass-message', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      persona_id: personaId, message_type: messageType, fan_ids: fanIds,
-    }),
   });
 
 // Mailboxes (per-persona AI mailboxes)
@@ -186,11 +126,6 @@ export const sendAsPersona = (personaId: string, fanId: string, content: string)
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ fan_id: fanId, content }),
   });
-
-export const getFanAnalytics = (personaId?: string) => {
-  const qs = personaId ? `?persona_id=${personaId}` : '';
-  return apiFetch(`/fans/analytics${qs}`);
-};
 
 // Social Accounts (platform signup + approval)
 export const listSocialAccounts = (params?: { persona_id?: string; platform?: string; status?: string }) => {
@@ -240,9 +175,6 @@ export const activateSocialAccount = (accountId: string) =>
     body: new URLSearchParams(),
   });
 
-export const listPersonaSocialAccounts = (personaId: string) =>
-  apiFetch(`/personas/${personaId}/social-accounts`);
-
 export const generateAccountEmail = (accountId: string) =>
   apiFetch(`/social-accounts/${accountId}/generate-email`, {
     method: 'POST',
@@ -270,16 +202,6 @@ export const storeCredentials = (accountId: string, password: string, username?:
   });
 };
 
-export const postToAccount = (accountId: string, contentPackId: string, caption?: string) => {
-  const qs = new URLSearchParams({ content_pack_id: contentPackId });
-  if (caption) qs.set('caption', caption);
-  return apiFetch(`/social-accounts/${accountId}/post`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: qs,
-  });
-};
-
 export const bulkSyncProfiles = () =>
   apiFetch('/social-accounts/bulk-sync', {
     method: 'POST',
@@ -287,5 +209,4 @@ export const bulkSyncProfiles = () =>
     body: new URLSearchParams(),
   });
 
-export const getPostHistory = (accountId: string) =>
-  apiFetch(`/social-accounts/${accountId}/post-history`);
+
