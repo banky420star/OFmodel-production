@@ -248,3 +248,40 @@ export const generateAccountEmail = (accountId: string) =>
 
 export const checkAccountEmails = (accountId: string) =>
   apiFetch(`/social-accounts/${accountId}/emails`);
+
+export const syncProfile = (accountId: string) =>
+  apiFetch(`/social-accounts/${accountId}/sync-profile`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(),
+  });
+
+export const storeCredentials = (accountId: string, password: string, username?: string) => {
+  const qs = new URLSearchParams({ platform_password: password });
+  if (username) qs.set('platform_username', username);
+  return apiFetch(`/social-accounts/${accountId}/store-credentials`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: qs,
+  });
+};
+
+export const postToAccount = (accountId: string, contentPackId: string, caption?: string) => {
+  const qs = new URLSearchParams({ content_pack_id: contentPackId });
+  if (caption) qs.set('caption', caption);
+  return apiFetch(`/social-accounts/${accountId}/post`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: qs,
+  });
+};
+
+export const bulkSyncProfiles = () =>
+  apiFetch('/social-accounts/bulk-sync', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(),
+  });
+
+export const getPostHistory = (accountId: string) =>
+  apiFetch(`/social-accounts/${accountId}/post-history`);

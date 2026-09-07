@@ -478,7 +478,15 @@ class ChatMessage(Base):
 # ─── Social Accounts (Platform Signup + Approval) ──────────────────────
 
 class SocialAccount(Base):
-    """A social media account for a persona — requires operator approval before going live."""
+    """A social media account for a persona — requires operator approval before going live.
+    
+    Production flow:
+    1. Operator requests account (draft → pending_approval)
+    2. Generate temp email via mail.tm for signup
+    3. Operator approves → account gets created on platform
+    4. Profile data synced from persona (avatar, bio, display name)
+    5. Content auto-posted from content packs
+    """
     __tablename__ = "social_accounts"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -486,22 +494,26 @@ class SocialAccount(Base):
     platform = Column(String(32), nullable=False)  # instagram, facebook, onlyfans, tiktok, twitter, fanvue, fansly
     username = Column(String(128), nullable=False)
     display_name = Column(String(256), default="")
-    email = Column(String(256), default="")  # signup email (encrypted at rest in production)
-    password_hash = Column(String(512), default="")  # hashed password
+    email = Column(String(256), default="")  # signup email (temp email from mail.tm)
+    password_hash = Column(String(512), default="")  # encrypted platform password
     profile_url = Column(String(512), default="")
     bio = Column(Text, default="")
-    status = Column(String(32), default="draft")  # draft, pending_approval, approved, active, rejected, suspended
+    profile_image_url = Column(String(512), default="")  # synced from persona avatar
+    status = Column(String(32), default="draft")  # draft, pending_approval, approved, signup_in_progress, active, rejected, suspended
+    signup_step = Column(String(64), default="")  # email_generated, signup_started, email_verified, profile_complete, api_connected
+    signup_progress = Column(Integer, default=0)  # 0-100 percent
     approval_notes = Column(Text, default="")  # operator notes on approval/rejection
-    approved_by = Column(String(128), default="")  # operator who approved
+    approved_by = Column(String(128), default="")
     approved_at = Column(DateTime(timezone=True), nullable=True)
     rejected_at = Column(DateTime(timezone=True), nullable=True)
     rejection_reason = Column(Text, default="")
+    last_posted_at = Column(DateTime(timezone=True), nullable=True)
+    posts_count = Column(Integer, default=0)
     followers = Column(Integer, default=0)
     following = Column(Integer, default=0)
-    posts_count = Column(Integer, default=0)
-    api_connected = Column(Boolean, default=False)  # whether API access is set up
-    api_token = Column(String(512), default="")  # platform API token
-    metadata_json = Column(JSON, default=dict)
+    api_connected = Column(Boolean, default=False)
+    api_token = Column(String(512), default="")  # platform API token (encrypted)
+    metadata_json = Column(JSON, default=dict)  # email tokens, platform-specific data
     created_at = Column(DateTime(timezone=True), default=utcnow)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 

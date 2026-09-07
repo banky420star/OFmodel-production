@@ -5,6 +5,7 @@ import {
   listSocialAccounts, requestSocialAccount, approveSocialAccount,
   rejectSocialAccount, activateSocialAccount, listPersonas,
   generateAccountEmail, checkAccountEmails,
+  syncProfile, bulkSyncProfiles, storeCredentials,
 } from '@/lib/api'
 
 interface SocialAccount {
@@ -161,13 +162,29 @@ export default function SocialsPage() {
               <h1>Social Accounts</h1>
               <p>Sign up models to social platforms. All accounts require approval before going live.</p>
             </div>
-            <button
-              className="primary-button"
-              onClick={() => setShowRequestForm(!showRequestForm)}
-              style={{ padding: '10px 18px', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer', flexShrink: 0 }}
-            >
-              + Request Account
-            </button>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                onClick={async () => {
+                  try {
+                    const r: any = await bulkSyncProfiles()
+                    alert(`Synced ${r.synced} of ${r.total} active accounts`)
+                  } catch (e: any) { alert(e.message) }
+                }}
+                style={{
+                  padding: '10px 18px', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer',
+                  border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'var(--text)',
+                }}
+              >
+                Sync All Profiles
+              </button>
+              <button
+                className="primary-button"
+                onClick={() => setShowRequestForm(!showRequestForm)}
+                style={{ padding: '10px 18px', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer', flexShrink: 0 }}
+              >
+                + Request Account
+              </button>
+            </div>
           </div>
         </section>
 
@@ -417,6 +434,17 @@ export default function SocialsPage() {
                     </div>
                   )}
 
+                  {/* Sync badge */}
+                  {(account.status === 'active' || account.status === 'approved') && (
+                    <div style={{
+                      padding: '3px 8px', borderRadius: 4, fontSize: 11,
+                      background: account.api_connected ? 'rgba(217,251,113,0.12)' : 'rgba(255,255,255,0.05)',
+                      color: account.api_connected ? 'var(--green)' : 'var(--text-muted)',
+                    }}>
+                      {account.api_connected ? '🔗 API Connected' : '🔗 No API'}
+                    </div>
+                  )}
+
                   {/* Actions */}
                   <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
                     {!account.email && account.status !== 'rejected' && (
@@ -493,6 +521,25 @@ export default function SocialsPage() {
                         }}
                       >
                         {actionLoading === account.id ? '...' : 'Activate'}
+                      </button>
+                    )}
+                    {account.status === 'active' && (
+                      <button
+                        onClick={async () => {
+                          setActionLoading(account.id)
+                          try {
+                            await syncProfile(account.id)
+                            refresh()
+                          } catch (e: any) { alert(e.message) }
+                          setActionLoading(null)
+                        }}
+                        disabled={actionLoading === account.id}
+                        style={{
+                          padding: '6px 12px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                          background: 'rgba(99,102,241,0.12)', color: '#818CF8', border: 'none',
+                        }}
+                      >
+                        {actionLoading === account.id ? '...' : 'Sync Profile'}
                       </button>
                     )}
                   </div>

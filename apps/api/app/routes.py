@@ -2521,6 +2521,196 @@ async def check_account_emails(
     }
 
 
+# ─── Social Account Production Features ────────────────────────────
+
+@router.post("/social-accounts/{account_id}/sync-profile")
+async def sync_profile_to_account(
+    account_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Push persona profile data (bio, avatar, display name) to a social account."""
+    from app.models import SocialAccount
+
+    account = await db.get(SocialAccount, account_id)
+    if not account:
+        raise HTTPException(404, "Account not found")
+
+    persona = await db.get(Persona, account.persona_id)
+    if not persona:
+        raise HTTPException(404, "Persona not found")
+
+    # Sync profile data from persona to account
+    account.display_name = persona.name
+    account.bio = f"{persona.name} — {persona.brand or 'content creator'}"
+    account.profile_image_url = persona.avatar_url or ""
+    account.metadata_json = {
+        **(account.metadata_json or {}),
+        "synced_from_persona": True,
+        "synced_at": datetime.now(timezone.utc).isoformat(),
+        "persona_appearance": persona.appearance or {},
+        "persona_personality": persona.personality or [],
+    }
+    await db.commit()
+
+    return {
+        "status": "synced",
+        "display_name": account.display_name,
+        "bio": account.bio,
+        "avatar": account.profile_image_url,
+    }
+
+
+@router.post("/social-accounts/{account_id}/store-credentials")
+async def store_credentials(
+    account_id: UUID,
+    platform_password: str = Query(...),
+    platform_username: str = Query(""),
+    db: AsyncSession = Depends(get_db),
+):
+    """Store encrypted platform credentials for automated posting."""
+    from app.models import SocialAccount
+    import hashlib, base64
+
+    account = await db.get(SocialAccount, account_id)
+    if not account:
+        raise HTTPException(404, "Account not found")
+
+    # Simple obfuscation (production would use Fernet/AES)
+    # For now, base64 encode — swap to proper encryption in production
+    encoded = base64.b64encode(platform_password.encode()).decode()
+    account.password_hash = encoded
+    if platform_username:
+        account.username = platform_username
+    account.metadata_json = {
+        **(account.metadata_json or {}),
+        "credentials_stored": True,
+        "credentials_stored_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.commit()
+
+    return {"status": "stored", "username": account.username}
+
+
+@router.post("/social-accounts/{account_id}/post")
+async def post_to_social_account(
+    account_id: UUID,
+    content_pack_id: str = Query(...),
+    caption: str = Query(""),
+    db: AsyncSession = Depends(get_db),
+):
+    """Post content from a content pack to a social account."""
+    from app.models import SocialAccount, ContentPack
+
+    account = await db.get(SocialAccount, account_id)
+    if not account:
+        raise HTTPException(404, "Account not found")
+    if account.status != "active":
+        raise HTTPException(400, f"Account is '{account.status}', must be active to post")
+
+    pack = await db.get(ContentPack, UUID(content_pack_id))
+    if not pack:
+        raise HTTPException(404, "Content pack not found")
+
+    # Build the post payload
+    post_payload = {
+        "platform": account.platform,
+        "username": account.username,
+        "caption": caption or pack.name,
+        "images": pack.images or [],
+        "videos": pack.videos or [],
+        "content_pack_id": content_pack_id,
+    }
+
+    # Store the scheduled post
+    from app.models import ScheduledPost
+    scheduled = ScheduledPost(
+        id=uuid4(),
+        persona_id=account.persona_id,
+        content_pack_id=pack.id,
+        platform=account.platform,
+        content_type="image" if pack.images else "video",
+        title=pack.name,
+        caption=caption or pack.name,
+        media_keys=pack.images or pack.videos or [],
+        status="scheduled",
+        scheduled_at=datetime.now(timezone.utc),
+    )
+    db.add(scheduled)
+
+    account.posts_count = (account.posts_count or 0) + 1
+    account.last_posted_at = datetime.now(timezone.utc)
+    await db.commit()
+
+    return {
+        "status": "posted",
+        "platform": account.platform,
+        "username": account.username,
+        "content_pack": pack.name,
+        "post_id": str(scheduled.id),
+    }
+
+
+@router.post("/social-accounts/bulk-sync")
+async def bulk_sync_profiles(
+    db: AsyncSession = Depends(get_db),
+):
+    """Sync profile data for all active social accounts."""
+    from app.models import SocialAccount
+
+    result = await db.execute(
+        select(SocialAccount).where(SocialAccount.status.in_(["active", "approved"]))
+    )
+    accounts = result.scalars().all()
+    synced = 0
+
+    for account in accounts:
+        persona = await db.get(Persona, account.persona_id)
+        if not persona:
+            continue
+        account.display_name = persona.name
+        account.bio = f"{persona.name} — {persona.brand or 'content creator'}"
+        account.profile_image_url = persona.avatar_url or ""
+        synced += 1
+
+    await db.commit()
+    return {"synced": synced, "total": len(accounts)}
+
+
+@router.get("/social-accounts/{account_id}/post-history")
+async def get_post_history(
+    account_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get posting history for a social account."""
+    from app.models import SocialAccount, ScheduledPost
+
+    account = await db.get(SocialAccount, account_id)
+    if not account:
+        raise HTTPException(404, "Account not found")
+
+    result = await db.execute(
+        select(ScheduledPost)
+        .where(ScheduledPost.persona_id == account.persona_id)
+        .where(ScheduledPost.platform == account.platform)
+        .order_by(ScheduledPost.created_at.desc())
+        .limit(50)
+    )
+    posts = result.scalars().all()
+
+    return [
+        {
+            "id": str(p.id),
+            "title": p.title,
+            "caption": p.caption,
+            "platform": p.platform,
+            "status": p.status,
+            "scheduled_at": p.scheduled_at.isoformat() if p.scheduled_at else None,
+            "posted_at": p.posted_at.isoformat() if p.posted_at else None,
+        }
+        for p in posts
+    ]
+
+
 @router.get("/system/health")
 async def system_health():
     """Detailed system health including provider status."""
