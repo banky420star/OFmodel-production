@@ -80,7 +80,7 @@ class VideoProvider(ABC):
         self,
         image_key: str,
         prompt: str = "",
-        duration: float = 4.0,
+        duration: float = 15.0,
         fps: int = 24,
     ) -> ProviderResult:
         ...
@@ -89,7 +89,7 @@ class VideoProvider(ABC):
     async def text_to_video(
         self,
         prompt: str,
-        duration: float = 4.0,
+        duration: float = 20.0,
         width: int = 1024,
         height: int = 576,
     ) -> ProviderResult:

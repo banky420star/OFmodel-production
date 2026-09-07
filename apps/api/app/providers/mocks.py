@@ -231,7 +231,7 @@ class MockVideoProvider(VideoProvider):
 
     async def image_to_video(
         self, image_key: str, prompt: str = "",
-        duration: float = 4.0, fps: int = 24,
+        duration: float = 20.0, fps: int = 24,
     ) -> ProviderResult:
         key = f"mock/videos/{_mock_id()}.mp4"
         fake_data = b"\x00" * 1024  # minimal mock video bytes
@@ -250,7 +250,7 @@ class MockVideoProvider(VideoProvider):
         )
 
     async def text_to_video(
-        self, prompt: str, duration: float = 4.0,
+        self, prompt: str, duration: float = 20.0,
         width: int = 1024, height: int = 576,
     ) -> ProviderResult:
         key = f"mock/videos/{_mock_id()}.mp4"

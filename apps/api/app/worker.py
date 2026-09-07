@@ -209,7 +209,7 @@ async def run_generate_shoot(job: dict) -> None:
                 result = await video_provider.image_to_video(
                     image_key="latest_image",
                     prompt="subtle natural motion",
-                    duration=4.0,
+                    duration=15.0,
                 )
                 logger.info("video_generated", success=result.success)
 

@@ -85,7 +85,7 @@ class DashScopeWanProvider(VideoProvider):
     async def text_to_video(
         self,
         prompt: str,
-        duration: float = 4.0,
+        duration: float = 20.0,
         width: int = 1280,
         height: int = 720,
         resolution: str = "720P",
@@ -97,7 +97,7 @@ class DashScopeWanProvider(VideoProvider):
 
         Args:
             prompt: Text description of the video.
-            duration: Duration in seconds (3-15).
+            duration: Duration in seconds (3-30). Default 20s.
             width/height: Output dimensions.
             resolution: "720P" or "1080P".
             audio_url: Optional URL of audio to accompany the video.
@@ -124,8 +124,8 @@ class DashScopeWanProvider(VideoProvider):
             else:
                 ratio = "1:1"
 
-            # Clamp duration to model limits (3-15s for Wan 2.7)
-            dur_sec = max(3, min(15, int(duration)))
+            # Clamp duration to model limits (3-30s for Wan 2.7 t2v)
+            dur_sec = max(3, min(30, int(duration)))
 
             input_data = {"prompt": prompt}
             if audio_url:
@@ -246,7 +246,7 @@ class DashScopeWanProvider(VideoProvider):
         self,
         image_key: str,
         prompt: str = "",
-        duration: float = 4.0,
+        duration: float = 15.0,
         fps: int = 24,
         resolution: str = "720P",
         negative_prompt: str = "",
@@ -256,7 +256,7 @@ class DashScopeWanProvider(VideoProvider):
         Args:
             image_key: URL or path to the source image.
             prompt: Motion/style description.
-            duration: Duration in seconds (2-15).
+            duration: Duration in seconds (2-15). Default 15s.
             resolution: "720P" or "1080P".
             negative_prompt: Elements to exclude.
         """

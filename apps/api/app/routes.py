@@ -960,7 +960,7 @@ async def toggle_autopilot(
 async def generate_video(
     persona_id: UUID,
     prompt: str = "",
-    duration: float = 4.0,
+    duration: float = 20.0,
     db: AsyncSession = Depends(get_db),
 ):
     """Generate a video for a persona using DashScope Wan.
@@ -1037,7 +1037,7 @@ async def generate_shoot_video(
     shoot_id: UUID,
     shot_index: int = 0,
     prompt: str = "",
-    duration: float = 4.0,
+    duration: float = 15.0,
     db: AsyncSession = Depends(get_db),
 ):
     """Generate a video from a shoot's image using image-to-video.
@@ -1577,7 +1577,7 @@ async def _run_auto_produce(
                 video_prompt = f"{identity_desc}, {theme_data['name'].lower()} scene, natural movement, cinematic"
                 video_result = await video_provider.text_to_video(
                     prompt=video_prompt,
-                    duration=4.0,
+                    duration=20.0,
                     width=720,
                     height=1280,
                 )

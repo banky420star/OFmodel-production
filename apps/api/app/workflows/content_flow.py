@@ -131,7 +131,7 @@ async def generate_shoot_videos_handler(
     for i in range(video_count):
         result = await vid_prov.text_to_video(
             prompt=f"{input_data.get('theme', 'lifestyle')} scene, shot {i+1}",
-            duration=4.0,
+            duration=20.0,
         )
         if result.success:
             vid = GeneratedVideo(
