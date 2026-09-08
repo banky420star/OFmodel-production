@@ -65,10 +65,43 @@ async def query_fan_messages(db: AsyncSession, fan_id: str, limit: int = 50, dir
     return msgs
 
 
-# ─── Dashboard (Phase 14) ────────────────────────────────────────────
+# ─── List all fans ──────────────────────────────────────────────────
 
 
-    return {"id": str(fan.id), "username": fan.username, "status": "created"}
+@router.get("/fans")
+async def list_fans(
+    persona_id: str = None,
+    status: str = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """List all fans across all personas."""
+    query = "SELECT id, persona_id, username, display_name, platform, status, subscription_tier, total_spent, ppv_purchases, tips_given, messages_sent, messages_received, last_active, last_message_at, fan_score, tags, notes, metadata_json, created_at, updated_at FROM fans WHERE 1=1"
+    params = {}
+    if persona_id:
+        query += " AND persona_id = :pid"
+        params["pid"] = persona_id
+    if status:
+        query += " AND status = :status"
+        params["status"] = status
+    query += " ORDER BY fan_score DESC"
+    result = await db.execute(text(query), params)
+    from types import SimpleNamespace
+    cols = ["id","persona_id","username","display_name","platform","status",
+            "subscription_tier","total_spent","ppv_purchases","tips_given",
+            "messages_sent","messages_received","last_active","last_message_at",
+            "fan_score","tags","notes","metadata_json","created_at","updated_at"]
+    rows = result.fetchall()
+    fans = []
+    for row in rows:
+        d = dict(zip(cols, row))
+        # Get persona name
+        pname = await db.execute(text("SELECT name FROM personas WHERE id = :pid"), {"pid": d["persona_id"]})
+        pn = pname.fetchone()
+        d["persona_name"] = pn[0] if pn else "Unknown"
+        d["id"] = str(d["id"])
+        d["persona_id"] = str(d["persona_id"])
+        fans.append(d)
+    return fans
 
 
 @router.get("/fans/{fan_id}/messages")
