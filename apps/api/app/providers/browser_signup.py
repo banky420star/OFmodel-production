@@ -129,44 +129,73 @@ async def signup_instagram(
             except Exception:
                 pass
 
-            # Instagram uses unlabeled text inputs in order: email, full name, username, then password
+            # Instagram form: email, password, birthday (comboboxes), full name, username
+            import random as _random
+
+            # Fill email (text input 0)
             text_inputs = page.locator('input[type="text"]')
-            input_count = await text_inputs.count()
-            print(f"  Instagram: found {input_count} text inputs")
-
-            # Fill email (input 0)
-            if input_count >= 1:
+            if await text_inputs.count() >= 1:
                 await text_inputs.nth(0).fill(email)
-                await asyncio.sleep(0.5)
-
-            # Fill full name (input 1)
-            if input_count >= 2:
-                await text_inputs.nth(1).fill(display_name)
-                await asyncio.sleep(0.5)
-
-            # Fill username (input 2)
-            if input_count >= 3:
-                await text_inputs.nth(2).fill(username)
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.3)
 
             # Fill password
             password_input = page.locator('input[type="password"]')
             if await password_input.count() > 0:
                 await password_input.first.fill(password)
+                await asyncio.sleep(0.3)
+
+            # Birthday — Instagram uses custom combobox dropdowns
+            months = ['January','February','March','April','May','June',
+                      'July','August','September','October','November','December']
+            month = _random.choice(months)
+            day = str(_random.randint(1, 28))
+            year = str(_random.randint(1995, 2000))
+
+            try:
+                await page.locator('[role="combobox"]:has-text("Month")').click()
+                await asyncio.sleep(0.5)
+                await page.get_by_role("option", name=month).click()
+                await asyncio.sleep(0.3)
+
+                await page.locator('[role="combobox"]:has-text("Day")').click()
+                await asyncio.sleep(0.5)
+                await page.get_by_role("option", name=day, exact=True).click()
+                await asyncio.sleep(0.3)
+
+                await page.locator('[role="combobox"]:has-text("Year")').click()
+                await asyncio.sleep(0.5)
+                await page.get_by_role("option", name=year, exact=True).click()
+                await asyncio.sleep(0.3)
+            except Exception as e:
+                logger.warning(f"Birthday selection failed: {e}")
+
+            # Fill full name (text input 1)
+            if await text_inputs.count() >= 2:
+                await text_inputs.nth(1).fill(display_name)
+                await asyncio.sleep(0.3)
+
+            # Fill username
+            username_input = page.locator('input[aria-label="Username"]')
+            if await username_input.count() > 0:
+                await username_input.fill(username)
                 await asyncio.sleep(1)
 
             # Take screenshot after filling
             screenshot_path = f"/tmp/ig_signup_2_{username}.png"
             await page.screenshot(path=screenshot_path)
 
-            # Click Sign Up button
-            signup_btn = page.locator('button[type="submit"], button:has-text("Sign up"), button:has-text("Sign Up")')
-            if await signup_btn.count() > 0:
-                await signup_btn.first.click()
-                await asyncio.sleep(3)
+            # Click Submit — Instagram uses div[role="button"], not <button>
+            submit = page.get_by_role("button", name="Submit")
+            if await submit.count() > 0:
+                await submit.click()
             else:
-                await page.keyboard.press("Enter")
-                await asyncio.sleep(3)
+                # Fallback: try regular button
+                signup_btn = page.locator('button[type="submit"]')
+                if await signup_btn.count() > 0:
+                    await signup_btn.first.click()
+                else:
+                    await page.keyboard.press("Enter")
+            await asyncio.sleep(5)
 
             # Take screenshot after submission
             screenshot_path = f"/tmp/ig_signup_3_{username}.png"
