@@ -1,6 +1,7 @@
 """Persona Studio — socials routes."""
 
 from __future__ import annotations
+import asyncio
 import json
 import time
 import random
@@ -499,3 +500,180 @@ async def get_post_history(
     ]
 
 
+# ─── Automated Browser Signup ─────────────────────────────────────
+
+import secrets as _secrets
+
+
+@router.post("/social-accounts/{account_id}/auto-signup")
+async def auto_signup_account(
+    account_id: UUID,
+    headless: bool = Query(True),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Automated browser signup for a social platform.
+    Uses Playwright to navigate to the platform, fill in the signup form,
+    and submit — using the email/password already stored on the account.
+    """
+    from app.models import SocialAccount
+    from app.providers.browser_signup import auto_signup
+
+    account = await db.get(SocialAccount, str(account_id))
+    if not account:
+        raise HTTPException(404, "Account not found")
+
+    if not account.email:
+        raise HTTPException(400, "No email address on this account. Generate one first.")
+
+    # Get or generate a password
+    password = getattr(account, 'password_hash', '') or ''
+    if not password:
+        password = _secrets.token_urlsafe(12)
+        import base64
+        account.password_hash = base64.b64encode(password.encode()).decode()
+
+    # Update status
+    account.status = "signup_in_progress"
+    account.signup_step = "signup_started"
+    await db.commit()
+
+    # Run the browser automation
+    try:
+        result = await auto_signup(
+            platform=account.platform,
+            email=account.email,
+            password=password,
+            display_name=account.display_name or account.username,
+            username=account.username,
+            headless=headless,
+        )
+    except Exception as e:
+        account.status = "pending_approval"
+        account.signup_step = ""
+        await db.commit()
+        raise HTTPException(500, f"Browser automation failed: {str(e)[:200]}")
+
+    # Update account based on result
+    if result.success:
+        account.status = "pending_approval" if result.status == "verification_needed" else "active"
+        account.signup_step = result.status
+        account.metadata_json = {
+            **(account.metadata_json or {}),
+            "signup_result": result.status,
+            "signup_message": result.message,
+            "signup_screenshot": result.screenshot_path,
+            "signup_at": datetime.now(timezone.utc).isoformat(),
+            "session_cookies": result.session_cookies[:5] if result.session_cookies else [],
+        }
+    else:
+        account.status = "pending_approval"
+        account.signup_step = result.status
+        account.approval_notes = result.message
+        account.metadata_json = {
+            **(account.metadata_json or {}),
+            "signup_result": result.status,
+            "signup_message": result.message,
+            "signup_screenshot": result.screenshot_path,
+            "signup_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    await db.commit()
+
+    return {
+        "success": result.success,
+        "status": result.status,
+        "message": result.message,
+        "screenshot": result.screenshot_path,
+        "platform": result.platform,
+        "username": result.username,
+        "email": result.email,
+    }
+
+
+@router.post("/social-accounts/auto-signup-all")
+async def auto_signup_all_pending(
+    platform: str = Query(""),
+    headless: bool = Query(True),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Run automated signup for all pending accounts of a given platform.
+    If no platform specified, runs for all pending accounts.
+    """
+    from app.models import SocialAccount
+    from app.providers.browser_signup import auto_signup
+
+    q = select(SocialAccount).where(
+        SocialAccount.status.in_(["pending_approval", "draft"])
+    )
+    if platform:
+        q = q.where(SocialAccount.platform == platform)
+
+    result = await db.execute(q)
+    accounts = result.scalars().all()
+
+    results = []
+    for account in accounts:
+        if not account.email:
+            results.append({"username": account.username, "status": "skipped", "message": "No email"})
+            continue
+
+        password = getattr(account, 'password_hash', '') or ''
+        if not password:
+            password = _secrets.token_urlsafe(12)
+            import base64
+            account.password_hash = base64.b64encode(password.encode()).decode()
+
+        account.status = "signup_in_progress"
+        await db.commit()
+
+        try:
+            res = await auto_signup(
+                platform=account.platform,
+                email=account.email,
+                password=password,
+                display_name=account.display_name or account.username,
+                username=account.username,
+                headless=headless,
+            )
+
+            if res.success:
+                account.status = "pending_approval"
+                account.signup_step = res.status
+            else:
+                account.approval_notes = res.message
+                account.signup_step = res.status
+
+            account.metadata_json = {
+                **(account.metadata_json or {}),
+                "signup_result": res.status,
+                "signup_message": res.message,
+                "signup_at": datetime.now(timezone.utc).isoformat(),
+            }
+            await db.commit()
+
+            results.append({
+                "username": account.username,
+                "platform": account.platform,
+                "success": res.success,
+                "status": res.status,
+                "message": res.message,
+            })
+        except Exception as e:
+            account.status = "pending_approval"
+            await db.commit()
+            results.append({
+                "username": account.username,
+                "success": False,
+                "status": "error",
+                "message": str(e)[:100],
+            })
+
+        # Rate limit between signups
+        await asyncio.sleep(3)
+
+    return {
+        "total": len(accounts),
+        "results": results,
+    }

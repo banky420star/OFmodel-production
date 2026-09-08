@@ -136,6 +136,27 @@ export default function SocialsPage() {
     setActionLoading(null)
   }
 
+  const handleAutoSignup = async (id: string) => {
+    setActionLoading(id)
+    try {
+      const res = await fetch(`/api/v1/social-accounts/${id}/auto-signup?headless=true`, {
+        method: 'POST',
+      })
+      const data = await res.json()
+      if (res.ok) {
+        alert(data.success
+          ? `${data.message}\n\nPlatform: ${data.platform}\nUsername: ${data.username}\nEmail: ${data.email}\n\nCheck inbox at ${data.email} for verification.`
+          : `${data.message}\n\nStatus: ${data.status}`)
+      } else {
+        alert(data.detail || data.message || 'Signup failed')
+      }
+      refresh()
+    } catch (e: any) {
+      alert('Auto-signup failed: ' + e.message)
+    }
+    setActionLoading(null)
+  }
+
   // Stats
   const pending = accounts.filter(a => a.status === 'pending_approval').length
   const active = accounts.filter(a => a.status === 'active' || a.status === 'approved').length
@@ -485,6 +506,18 @@ export default function SocialsPage() {
                         }}
                       >
                         Check Inbox
+                      </button>
+                    )}
+                    {account.email && account.status === 'pending_approval' && account.platform !== 'onlyfans' && (
+                      <button
+                        onClick={() => handleAutoSignup(account.id)}
+                        disabled={actionLoading === account.id}
+                        style={{
+                          padding: '6px 12px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                          background: 'rgba(34,197,94,0.12)', color: '#22C55E', border: 'none',
+                        }}
+                      >
+                        {actionLoading === account.id ? '...' : '🚀 Sign Up'}
                       </button>
                     )}
                     {account.status === 'pending_approval' && (
