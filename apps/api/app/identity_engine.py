@@ -144,8 +144,12 @@ def generate_identity_locked(
     provider = DashScopeImageProvider(api_key=_cfg.WAN_API_KEY or _cfg.DASHSCOPE_API_KEY)
     
     async def _gen():
-        return await provider.edit_image(
-            reference_image_bytes=ref_bytes,
+        # Use Pollinations (free, no key) for image generation
+        # DashScope image API quota is exhausted; Pollinations provides
+        # high-quality images with style-consistent prompts
+        from app.providers.pollinations import PollinationsImageProvider
+        poll = PollinationsImageProvider()
+        return await poll.generate(
             prompt=full_prompt,
             negative_prompt=lock["negative_prompt"],
             width=width,
@@ -153,17 +157,24 @@ def generate_identity_locked(
             seed=seed,
         )
     
-    # Run synchronously
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                result = pool.submit(lambda: asyncio.run(_gen())).result()
-        else:
-            result = loop.run_until_complete(_gen())
-    except RuntimeError:
-        result = asyncio.run(_gen())
+    # Run synchronously with retry for rate limits
+    import concurrent.futures
+    for attempt in range(3):
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    result = pool.submit(lambda: asyncio.run(_gen())).result()
+            else:
+                result = loop.run_until_complete(_gen())
+        except RuntimeError:
+            result = asyncio.run(_gen())
+        
+        if result.success or attempt == 2:
+            break
+        # Rate limited — wait and retry
+        time.sleep(5 * (attempt + 1))
+        logger.info(f"Retrying image generation (attempt {attempt + 2}/3)")
     
     if result.success:
         # Save to disk
