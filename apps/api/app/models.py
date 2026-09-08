@@ -513,6 +513,10 @@ class SocialAccount(Base):
     following = Column(Integer, default=0)
     api_connected = Column(Boolean, default=False)
     api_token = Column(String(512), default="")  # platform API token (encrypted)
+    email_account_id = Column(String(256), default="")  # mail.tm account ID
+    email_password = Column(String(256), default="")  # mail.tm email password
+    email_token = Column(Text, default="")  # mail.tm JWT auth token
+    email_domain = Column(String(256), default="")  # mail.tm domain used
     metadata_json = Column(JSON, default=dict)  # email tokens, platform-specific data
     created_at = Column(DateTime(timezone=True), default=utcnow)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)

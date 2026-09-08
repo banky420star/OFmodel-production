@@ -286,12 +286,14 @@ async def check_account_emails(
     from app.models import SocialAccount
     from app.providers.email import fetch_emails
 
-    account = await db.get(SocialAccount, account_id)
+    account = await db.get(SocialAccount, str(account_id))
     if not account:
         raise HTTPException(404, "Account not found")
 
-    meta = account.metadata_json or {}
-    token = meta.get("email_token", "")
+    token = getattr(account, 'email_token', '') or ''
+    if not token:
+        meta = account.metadata_json or {}
+        token = meta.get("email_token", "")
     if not token:
         raise HTTPException(400, "No email account generated yet. Call generate-email first.")
 
