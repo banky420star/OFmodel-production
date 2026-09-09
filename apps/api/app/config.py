@@ -27,6 +27,10 @@ class Settings(BaseSettings):
 
     # Provider configuration
     PROVIDER_REGISTRY: str = "mock"  # mock | comfyui | elevenlabs | wan | ollama
+    # TTL (seconds) a provider is skipped after a quota/rate/unavailability error
+    PROVIDER_COOLDOWN_SECONDS: int = 900
+    # Per-attempt timeout (seconds) for a single image provider call
+    PROVIDER_TIMEOUT_SECONDS: int = 120
 
     # External API keys
     ELEVENLABS_API_KEY: str = ""

@@ -4,7 +4,8 @@ Central module for all identity-locked image generation.
 Every image generated for a persona goes through this engine,
 ensuring consistent facial identity across shoots, gallery, and content.
 
-Uses the persona's avatar as reference image + DashScope Qwen-Image Edit
+Uses the persona's avatar as reference image and the configured provider
+registry chain (ComfyUI → DashScope → HuggingFace → Pollinations → Mock)
 to preserve facial features while changing scene/outfit/pose.
 """
 
@@ -91,12 +92,26 @@ def get_avatar_bytes(persona_id_hex: str) -> Optional[bytes]:
 
 def build_locked_prompt(identity_lock: dict, scene_prompt: str) -> str:
     """Combine identity prompt with scene prompt for consistent generation.
-    
+
     The identity prompt anchors the facial features.
     The scene prompt adds the new context (outfit, setting, pose).
     """
     base = identity_lock["identity_prompt"]
     return f"Perfectly preserve the facial features. {base}. {scene_prompt}"
+
+
+def _placeholder_png(seed: int, width: int, height: int) -> bytes:
+    """Deterministic placeholder PNG for mock generation (no raw bytes)."""
+    import random
+    rng = random.Random(seed)
+    img = Image.new(
+        "RGB",
+        (max(1, min(width, 1024)), max(1, min(height, 1024))),
+        (rng.randint(80, 220), rng.randint(80, 220), rng.randint(80, 220)),
+    )
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
 
 
 def generate_identity_locked(
@@ -114,42 +129,37 @@ def generate_identity_locked(
     1. Loads the persona's avatar as reference
     2. Loads the identity lock (seed + prompt)
     3. Combines identity prompt with scene prompt
-    4. Generates via DashScope Qwen-Image Edit
+    4. Generates via the provider registry chain (with TTL cooldown on
+       quota/rate/unavailable providers)
     5. Saves to output_path
     
     Returns dict with success, image_path, latency_ms, etc.
     """
     import asyncio
-    from app.providers.dashscope_image import DashScopeImageProvider
-    
+    from app.providers.registry import get_registry
+
     # Load identity lock
     lock = get_identity_lock(persona_id_hex)
     if not lock:
         return {"success": False, "error": "No identity lock for persona"}
-    
+
     # Load avatar reference
     ref_bytes = get_avatar_bytes(persona_id_hex)
     if not ref_bytes:
         return {"success": False, "error": "No avatar found for persona"}
-    
+
     # Build prompt
     full_prompt = build_locked_prompt(lock, scene_prompt)
-    
+
     # Use locked seed (or override)
     seed = seed_override if seed_override is not None else lock["seed"]
-    
-    # Generate — pass API key from config
-    from app.config import get_settings
-    _cfg = get_settings()
-    provider = DashScopeImageProvider(api_key=_cfg.WAN_API_KEY or _cfg.DASHSCOPE_API_KEY)
-    
+
     async def _gen():
-        # Use Pollinations (free, no key) for image generation
-        # DashScope image API quota is exhausted; Pollinations provides
-        # high-quality images with style-consistent prompts
-        from app.providers.pollinations import PollinationsImageProvider
-        poll = PollinationsImageProvider()
-        return await poll.generate(
+        # Generate via the provider registry chain
+        # (ComfyUI → DashScope → HuggingFace → Pollinations → Mock) with
+        # TTL-based cooldown when a provider is out of quota or unavailable.
+        provider = get_registry().get_image_provider()
+        return await provider.generate(
             prompt=full_prompt,
             negative_prompt=lock["negative_prompt"],
             width=width,
@@ -177,17 +187,25 @@ def generate_identity_locked(
         logger.info(f"Retrying image generation (attempt {attempt + 2}/3)")
     
     if result.success:
-        # Save to disk
+        # Save to disk. Mock providers don't return raw bytes — fall back to a
+        # deterministic placeholder so the caller still gets a usable file.
+        image_bytes = result.data.get("image_bytes")
+        if not image_bytes:
+            logger.warning(
+                "provider returned no image_bytes (provider=%s) — writing placeholder",
+                result.provider or "unknown",
+            )
+            image_bytes = _placeholder_png(seed, width, height)
         out = Path(output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(result.data["image_bytes"])
-        
+        out.write_bytes(image_bytes)
+
         return {
             "success": True,
             "image_path": str(out),
             "seed": seed,
             "prompt": full_prompt,
-            "size_bytes": len(result.data["image_bytes"]),
+            "size_bytes": len(image_bytes),
             "latency_ms": result.latency_ms,
         }
     else:
