@@ -7,7 +7,7 @@ import {
   getAnalytics, getForecasts, getSchedule, getGallery,
   createShoot, createPack,
   generateAnalytics, generateForecast, generateSchedule,
-  toggleAutopilot,
+  toggleAutopilot, mediaUrl,
 } from '@/lib/api'
 import { GRADIENTS } from '@/lib/constants'
 import { Icons } from '@/lib/icons'
@@ -73,7 +73,7 @@ function GalleryTab({ id }: { id: string }) {
       <h3 className="section-title">Gallery ({gallery.count} images)</h3>
       {selected && (
         <div className="gallery-lightbox" onClick={() => setSelected(null)}>
-          <img src={selected} alt="Full size" style={{ maxWidth: '90vw', maxHeight: '85vh', borderRadius: 8 }} />
+          <img src={mediaUrl(selected)} alt="Full size" style={{ maxWidth: '90vw', maxHeight: '85vh', borderRadius: 8 }} />
         </div>
       )}
       <div className="gallery-grid">
@@ -83,7 +83,7 @@ function GalleryTab({ id }: { id: string }) {
             className="gallery-thumb"
             onClick={() => setSelected(img.url)}
           >
-            <img src={img.url} alt={img.label} />
+            <img src={mediaUrl(img.url)} alt={img.label} />
             <span className="gallery-label">{img.label}</span>
           </button>
         ))}
@@ -330,7 +330,7 @@ export default function PersonaPage() {
         <div className="persona-header">
           <div className="persona-avatar" style={{ background: GRADIENTS[0] }}>
             {persona.avatar_url ? (
-              <img src={persona.avatar_url} alt={persona.name} style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 'inherit' }} />
+              <img src={mediaUrl(persona.avatar_url)} alt={persona.name} style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 'inherit' }} />
             ) : (
               persona.name[0]
             )}

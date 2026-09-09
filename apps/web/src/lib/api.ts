@@ -2,12 +2,56 @@
 // For local dev outside Docker: set NEXT_PUBLIC_API_URL=http://localhost:8000
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
-async function apiFetch(path: string, options: RequestInit = {}) {
+// ---------------------------------------------------------------------------
+// API auth gate (single shared operator token — no users/sessions/OAuth).
+// The backend compares `Authorization: Bearer <token>` against its
+// API_AUTH_TOKEN setting; leave empty to disable auth entirely (local dev).
+// Operators paste the token once on the /settings page, which stores it here.
+// ---------------------------------------------------------------------------
+export const API_TOKEN_STORAGE_KEY = 'persona-studio:api-token';
+
+export function getApiToken(): string | null {
+  try {
+    return localStorage.getItem(API_TOKEN_STORAGE_KEY) || null;
+  } catch {
+    return null;
+  }
+}
+
+export function setApiToken(token: string): void {
+  try {
+    if (token) localStorage.setItem(API_TOKEN_STORAGE_KEY, token);
+    else localStorage.removeItem(API_TOKEN_STORAGE_KEY);
+  } catch {
+    // Storage unavailable (private mode, etc.) — token simply won't persist.
+  }
+}
+
+function authHeaders(): Record<string, string> {
+  const token = getApiToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+// For <img src> URLs served by the API (avatars, gallery, shoots, adult content).
+// Browser image tags cannot send Authorization headers, so the token is appended
+// as a query param. TRADEOFF (documented on the backend too): with auth enabled
+// the token appears in image URLs; acceptable for a single-operator gate.
+// No-op when auth is disabled (no token) or the path is not an API media URL.
+export function mediaUrl(path: string): string {
+  const token = getApiToken();
+  if (!token || !path.startsWith('/api/v1/')) return path;
+  return `${path}${path.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`;
+}
+
+export async function apiFetch(path: string, options: RequestInit = {}) {
   const res = await fetch(`${API_URL}/api/v1${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options.headers },
     ...options,
+    headers: { 'Content-Type': 'application/json', ...authHeaders(), ...options.headers },
   });
   if (!res.ok) {
+    if (res.status === 401) {
+      throw new Error('Unauthorized — check API token in Settings');
+    }
     const text = await res.text();
     throw new Error(`API ${res.status}: ${text}`);
   }

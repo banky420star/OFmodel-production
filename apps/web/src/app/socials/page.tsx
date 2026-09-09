@@ -5,7 +5,7 @@ import {
   listSocialAccounts, requestSocialAccount, approveSocialAccount,
   rejectSocialAccount, activateSocialAccount, listPersonas,
   generateAccountEmail, checkAccountEmails,
-  syncProfile, bulkSyncProfiles, storeCredentials,
+  syncProfile, bulkSyncProfiles, storeCredentials, apiFetch,
 } from '@/lib/api'
 
 interface SocialAccount {
@@ -139,20 +139,16 @@ export default function SocialsPage() {
   const handleAutoSignup = async (id: string) => {
     setActionLoading(id)
     try {
-      const res = await fetch(`/api/v1/social-accounts/${id}/auto-signup?headless=true`, {
+      // Routed through apiFetch so the API auth Bearer header is attached.
+      const data: any = await apiFetch(`/social-accounts/${id}/auto-signup?headless=true`, {
         method: 'POST',
       })
-      const data = await res.json()
-      if (res.ok) {
-        alert(data.success
-          ? `${data.message}\n\nPlatform: ${data.platform}\nUsername: ${data.username}\nEmail: ${data.email}\n\nCheck inbox at ${data.email} for verification.`
-          : `${data.message}\n\nStatus: ${data.status}`)
-      } else {
-        alert(data.detail || data.message || 'Signup failed')
-      }
+      alert(data.success
+        ? `${data.message}\n\nPlatform: ${data.platform}\nUsername: ${data.username}\nEmail: ${data.email}\n\nCheck inbox at ${data.email} for verification.`
+        : `${data.message}\n\nStatus: ${data.status}`)
       refresh()
     } catch (e: any) {
-      alert('Auto-signup failed: ' + e.message)
+      alert('Auto-signup failed: ' + (e.message || 'unknown error'))
     }
     setActionLoading(null)
   }

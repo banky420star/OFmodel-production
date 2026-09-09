@@ -62,12 +62,27 @@ workflow_engine._session_factory = TestSessionLocal
 # Force mock providers for tests (avoid real LLM/image/voice calls)
 import os
 os.environ["PROVIDER_REGISTRY"] = "mock"
+os.environ["API_AUTH_TOKEN"] = ""
 from app.providers.registry import reset_registry, get_registry
 from app.config import get_settings
 get_settings.cache_clear()
 reset_registry()
 _registry = get_registry()
 assert _registry._mode == "mock", f"Expected mock, got {_registry._mode}"
+
+
+@pytest.fixture(autouse=True)
+def auth_disabled(monkeypatch):
+    """Force API_AUTH_TOKEN empty for every test.
+
+    The auth dependency calls get_settings() at request time, so the settings
+    cache is cleared before/after each test: an operator's exported
+    API_AUTH_TOKEN can never accidentally gate the suite.
+    """
+    monkeypatch.setenv("API_AUTH_TOKEN", "")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 @pytest_asyncio.fixture

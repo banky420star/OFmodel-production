@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { getDashboardSummary } from '@/lib/api'
+import { getDashboardSummary, mediaUrl } from '@/lib/api'
 import type { DashboardSummary } from '@/lib/types'
 import { GRADIENTS } from '@/lib/constants'
 import { Icons } from '@/lib/icons'
@@ -52,7 +52,7 @@ export default function ModelsPage() {
                 <article className="persona-card">
                   <div className="persona-art" style={{ background: GRADIENTS[i % GRADIENTS.length] }}>
                     {p.avatar_url ? (
-                      <img src={p.avatar_url} alt={p.name} style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 'inherit' }} />
+                      <img src={mediaUrl(p.avatar_url)} alt={p.name} style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 'inherit' }} />
                     ) : (
                       <span>{p.name[0]}</span>
                     )}

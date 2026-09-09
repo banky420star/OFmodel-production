@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { getDashboardSummary, listVideos, autoProduce, listJobs, listPersonas } from '@/lib/api'
+import { getDashboardSummary, listVideos, autoProduce, listJobs, listPersonas, mediaUrl } from '@/lib/api'
 import type { DashboardSummary, ShootDetail, PersonaDetail } from '@/lib/types'
 import { Icons } from '@/lib/icons'
 import { StatusBadge } from '@/components/ui/StatusBadge'
@@ -163,7 +163,7 @@ export default function ProductionPage() {
                       justifyContent: 'center', flexShrink: 0,
                     }}>
                       {p.avatar_url ? (
-                        <img src={p.avatar_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                        <img src={mediaUrl(p.avatar_url)} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                       ) : (
                         <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-muted)' }}>
                           {p.name.charAt(0)}
@@ -259,7 +259,7 @@ export default function ProductionPage() {
                         justifyContent: 'center', flexShrink: 0,
                       }}>
                         {shootImgUrl ? (
-                          <img src={shootImgUrl} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                          <img src={mediaUrl(shootImgUrl)} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                         ) : (
                           <span style={{ color: 'var(--text-muted)' }}>{Icons.image}</span>
                         )}
@@ -290,7 +290,7 @@ export default function ProductionPage() {
                               width: 72, height: 72, borderRadius: 6, overflow: 'hidden',
                               border: '1px solid var(--border)', flexShrink: 0,
                             }}>
-                              <img src={url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                              <img src={mediaUrl(url)} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                             </div>
                           ) : null
                         })}

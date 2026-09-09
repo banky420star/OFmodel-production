@@ -1,19 +1,29 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { getDashboardSummary } from '@/lib/api'
+import { getDashboardSummary, getApiToken, setApiToken } from '@/lib/api'
 import type { DashboardSummary } from '@/lib/types'
 import { Icons } from '@/lib/icons'
 
 export default function SettingsPage() {
   const [summary, setSummary] = useState<DashboardSummary | null>(null)
   const [loading, setLoading] = useState(true)
+  const [tokenInput, setTokenInput] = useState('')
+  const [tokenSaved, setTokenSaved] = useState(false)
 
   useEffect(() => {
     getDashboardSummary()
       .then(data => { setSummary(data); setLoading(false) })
       .catch(() => setLoading(false))
+    setTokenInput(getApiToken() || '')
   }, [])
+
+  const saveToken = () => {
+    setApiToken(tokenInput.trim())
+    setTokenInput(tokenInput.trim())
+    setTokenSaved(true)
+    setTimeout(() => setTokenSaved(false), 2000)
+  }
 
   const providers = [
     { name: 'LLM', key: 'llm', description: 'Ollama — local language model for identity generation, shoot planning, QA' },
@@ -39,6 +49,35 @@ export default function SettingsPage() {
           <h1>Settings</h1>
           <p>Provider configuration and system status.</p>
         </section>
+
+        <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>API Access</h3>
+        <div className="panel" style={{ padding: '14px 16px', marginBottom: 32 }}>
+          <label htmlFor="api-token" style={{ display: 'block', fontWeight: 600, fontSize: 13, marginBottom: 4 }}>
+            API Token
+          </label>
+          <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 10 }}>
+            Shared operator token for the backend API. Paste the API_AUTH_TOKEN value the API
+            was started with; leave empty when the API runs without auth. Stored in this browser
+            only and sent as a Bearer header on every request.
+          </p>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input
+              id="api-token"
+              type="password"
+              value={tokenInput}
+              placeholder="Paste API token (leave empty if auth is disabled)"
+              onChange={e => setTokenInput(e.target.value)}
+              style={{ flex: 1, padding: '8px 10px', fontSize: 13, borderRadius: 6, border: '1px solid var(--border, #333)', background: 'transparent', color: 'inherit' }}
+            />
+            <button
+              className="btn"
+              onClick={saveToken}
+              style={{ padding: '8px 16px', fontSize: 13, cursor: 'pointer' }}
+            >
+              {tokenSaved ? 'Saved' : 'Save'}
+            </button>
+          </div>
+        </div>
 
         {loading ? (
           <p className="muted-md">Loading settings…</p>

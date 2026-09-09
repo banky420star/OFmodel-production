@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useRef, use } from 'react'
-import { getMailbox, listFanMessages, autoReply, sendAsPersona } from '@/lib/api'
+import { getMailbox, listFanMessages, autoReply, sendAsPersona, mediaUrl } from '@/lib/api'
 
 interface Thread {
   fan_id: string
