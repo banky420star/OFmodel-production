@@ -333,8 +333,12 @@ async def fan_analytics(
     whales = len([f for f in fans if (f.total_spent or 0) > 100])
     at_risk = len([f for f in fans if f.status == "inactive"])
     
-    week_ago = datetime.utcnow() - timedelta(days=7)
-    new_this_week = len([f for f in fans if f.created_at and f.created_at > week_ago])
+    week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+    # SQLite returns naive datetimes for DateTime(timezone=True) columns;
+    # treat naive values as UTC before comparing against the aware window.
+    def _aware(dt):
+        return dt.replace(tzinfo=timezone.utc) if dt and dt.tzinfo is None else dt
+    new_this_week = len([f for f in fans if f.created_at and _aware(f.created_at) > week_ago])
     
     # Top 10 fans by spending
     sorted_fans = sorted(fans, key=lambda f: f.total_spent or 0, reverse=True)[:10]
