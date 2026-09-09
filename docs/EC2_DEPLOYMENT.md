@@ -65,9 +65,7 @@ MinIO:     http://YOUR_PUBLIC_IP:9001
 | `web` | 3000 | Next.js frontend |
 | `api` | 8000 | FastAPI backend |
 | `postgres` | 5432 | Database (internal) |
-| `redis` | 6379 | Job queue (internal) |
 | `minio` | 9000/9001 | Object storage |
-| `worker` | — | Celery background jobs |
 
 ## Adding Real Providers Later
 
@@ -89,7 +87,7 @@ ELEVENLABS_API_KEY=sk_your_key
 Then restart:
 
 ```bash
-docker compose restart api worker
+docker compose restart api
 ```
 
 ## Useful Commands
@@ -97,7 +95,6 @@ docker compose restart api worker
 ```bash
 # View logs
 docker compose logs -f api
-docker compose logs -f worker
 
 # Restart a service
 docker compose restart api

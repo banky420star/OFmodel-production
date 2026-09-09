@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY apps/api/pyproject.toml .
 RUN pip install --no-cache-dir ".[dev]" 2>/dev/null || pip install --no-cache-dir \
     fastapi uvicorn[standard] sqlalchemy[asyncio] asyncpg aiosqlite alembic \
-    pydantic pydantic-settings "redis[hiredis]" "celery[redis]" minio httpx \
+    pydantic pydantic-settings minio httpx \
     structlog python-multipart Pillow numpy scikit-learn websockets \
     pytest pytest-asyncio pytest-cov httpx factory-boy
 
