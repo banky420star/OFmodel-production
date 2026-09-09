@@ -44,6 +44,14 @@ class Settings(BaseSettings):
     INSTAGRAM_ACCESS_TOKEN: str = ""
     INSTAGRAM_ACCOUNT_ID: str = ""  # The Instagram Business Account ID (numeric)
 
+    # Encryption key for credentials at rest (platform passwords, email
+    # credentials, session cookies). Accepts either a raw Fernet key
+    # (`python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`)
+    # or any passphrase (hashed to derive the key). If unset, a documented
+    # dev-only fallback key is used and a warning is logged — always set this
+    # in production.
+    ENCRYPTION_KEY: str = ""
+
     # Workflow engine
     MAX_CONCURRENT_WORKFLOWS: int = 10
     WORKFLOW_STEP_TIMEOUT_SECONDS: int = 300

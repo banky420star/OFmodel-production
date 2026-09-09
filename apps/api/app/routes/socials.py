@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models import SocialAccount, Persona
+from app.crypto import encrypt_value, decrypt_value
 from app.providers.email import create_temp_email, fetch_emails
 
 router = APIRouter()
@@ -259,13 +260,15 @@ async def generate_account_email(
     except Exception as e:
         raise HTTPException(502, f"Failed to create email: {e}")
 
-    # Store email info in the account
+    # Store email info in the account (password + JWT token encrypted at rest)
     account.email = email_result.address
+    account.email_password = encrypt_value(email_result.password)
+    account.email_token = encrypt_value(email_result.token)
     account.metadata_json = {
         **(account.metadata_json or {}),
         "email_account_id": email_result.account_id,
-        "email_password": email_result.password,
-        "email_token": email_result.token,
+        "email_password": encrypt_value(email_result.password),
+        "email_token": encrypt_value(email_result.token),
         "email_domain": email_result.domain,
     }
     await db.commit()
@@ -291,10 +294,11 @@ async def check_account_emails(
     if not account:
         raise HTTPException(404, "Account not found")
 
-    token = getattr(account, 'email_token', '') or ''
+    # Stored encrypted (legacy plaintext/base64 values decrypt as-is)
+    token = decrypt_value(account.email_token or '')
     if not token:
         meta = account.metadata_json or {}
-        token = meta.get("email_token", "")
+        token = decrypt_value(meta.get("email_token", ""))
     if not token:
         raise HTTPException(400, "No email account generated yet. Call generate-email first.")
 
@@ -358,16 +362,18 @@ async def store_credentials(
 ):
     """Store encrypted platform credentials for automated posting."""
     from app.models import SocialAccount
-    import hashlib, base64
 
-    account = await db.get(SocialAccount, account_id)
+    account = await db.get(SocialAccount, str(account_id))
     if not account:
         raise HTTPException(404, "Account not found")
 
-    # Simple obfuscation (production would use Fernet/AES)
-    # For now, base64 encode — swap to proper encryption in production
-    encoded = base64.b64encode(platform_password.encode()).decode()
-    account.password_hash = encoded
+    # Encrypted at rest (Fernet); decrypt_value on read, legacy values fall back.
+    # Refuse rather than truncate: password_hash is String(512), so a ciphertext
+    # longer than that would be lost (Postgres raises, SQLite silently truncates).
+    encrypted = encrypt_value(platform_password)
+    if len(encrypted) > 512:
+        raise HTTPException(400, "Password too long to store encrypted (max ~200 characters)")
+    account.password_hash = encrypted
     if platform_username:
         account.username = platform_username
     account.metadata_json = {
@@ -526,12 +532,11 @@ async def auto_signup_account(
     if not account.email:
         raise HTTPException(400, "No email address on this account. Generate one first.")
 
-    # Get or generate a password
-    password = getattr(account, 'password_hash', '') or ''
+    # Get or generate a password (stored encrypted; legacy values fall back)
+    password = decrypt_value(account.password_hash or '')
     if not password:
         password = _secrets.token_urlsafe(12)
-        import base64
-        account.password_hash = base64.b64encode(password.encode()).decode()
+        account.password_hash = encrypt_value(password)
 
     # Update status
     account.status = "signup_in_progress"
@@ -564,7 +569,10 @@ async def auto_signup_account(
             "signup_message": result.message,
             "signup_screenshot": result.screenshot_path,
             "signup_at": datetime.now(timezone.utc).isoformat(),
-            "session_cookies": result.session_cookies[:5] if result.session_cookies else [],
+            # Session cookies encrypted at rest (JSON blob, first 5 cookies)
+            "session_cookies": encrypt_value(json.dumps(
+                result.session_cookies[:5] if result.session_cookies else []
+            )),
         }
     else:
         account.status = "pending_approval"
@@ -619,11 +627,10 @@ async def auto_signup_all_pending(
             results.append({"username": account.username, "status": "skipped", "message": "No email"})
             continue
 
-        password = getattr(account, 'password_hash', '') or ''
+        password = decrypt_value(account.password_hash or '')
         if not password:
             password = _secrets.token_urlsafe(12)
-            import base64
-            account.password_hash = base64.b64encode(password.encode()).decode()
+            account.password_hash = encrypt_value(password)
 
         account.status = "signup_in_progress"
         await db.commit()
