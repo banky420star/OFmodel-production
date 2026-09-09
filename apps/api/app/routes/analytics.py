@@ -22,6 +22,7 @@ from app.schemas import (
     AnalyticsSnapshotResponse, ForecastResponse, ForecastScenario,
 )
 from app.providers.registry import get_registry
+from app.routes.personas import ManualAnalyticsInput
 
 router = APIRouter()
 

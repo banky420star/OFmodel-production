@@ -17,15 +17,6 @@ services:
       timeout: 5s
       retries: 5
 
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
   minio:
     image: minio/minio:latest
     restart: unless-stopped
@@ -46,7 +37,6 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-persona}:${POSTGRES_PASSWORD:-persona_secret}@postgres:5432/${POSTGRES_DB:-persona_studio}
       DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:-persona}:${POSTGRES_PASSWORD:-persona_secret}@postgres:5432/${POSTGRES_DB:-persona_studio}
-      REDIS_URL: redis://redis:6379/0
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-persona}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-persona_secret}
@@ -63,8 +53,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
       minio:
         condition: service_started
     volumes:
@@ -74,35 +62,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
-  worker:
-    build:
-      context: .
-      dockerfile: Dockerfile.api
-    command: ["celery", "-A", "app.celery_app", "worker", "--loglevel=info", "--concurrency=4"]
-    restart: unless-stopped
-    environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-persona}:${POSTGRES_PASSWORD:-persona_secret}@postgres:5432/${POSTGRES_DB:-persona_studio}
-      DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:-persona}:${POSTGRES_PASSWORD:-persona_secret}@postgres:5432/${POSTGRES_DB:-persona_studio}
-      REDIS_URL: redis://redis:6379/0
-      MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-persona}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-persona_secret}
-      MINIO_BUCKET: ${MINIO_BUCKET:-persona-studio}
-      ENVIRONMENT: ${ENVIRONMENT:-development}
-      PROVIDER_REGISTRY: ${PROVIDER_REGISTRY:-mock}
-      COMFYUI_URL: ${COMFYUI_URL:-}
-      WAN_VIDEO_URL: ${WAN_VIDEO_URL:-}
-      WAN_API_KEY: ${WAN_API_KEY:-}
-      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
-      GPU_WORKER_URL: ${GPU_WORKER_URL:-}
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    volumes:
-      - ./apps/api:/app
 
   web:
     build:

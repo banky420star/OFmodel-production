@@ -5,7 +5,7 @@ The main application with all 14 phases implemented.
 
 import os
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pathlib import Path
@@ -14,7 +14,6 @@ import structlog
 from app.config import get_settings
 from app.database import init_db
 from app.routes import router
-from app.routes_jobs import router as jobs_router
 
 settings = get_settings()
 
@@ -57,7 +56,19 @@ app.add_middleware(
 )
 
 app.include_router(router, prefix="/api/v1")
-app.include_router(jobs_router, prefix="/api/v1")
+
+
+def _safe_file_path(base_dir: Path, *parts: str) -> Path | None:
+    """Join *parts* under *base_dir*, refusing path-traversal escapes.
+
+    Returns the resolved path if it is a real file inside base_dir, else None.
+    """
+    base = base_dir.resolve()
+    candidate = base.joinpath(*parts).resolve()
+    if candidate != base and base not in candidate.parents:
+        return None
+    return candidate if candidate.is_file() else None
+
 
 # Avatar static files
 AVATARS_DIR = Path(__file__).parent.parent / "storage" / "avatars"
@@ -66,9 +77,8 @@ AVATARS_DIR = Path(__file__).parent.parent / "storage" / "avatars"
 @app.get("/api/v1/avatars/{filename}")
 async def serve_avatar(filename: str):
     """Serve persona avatar images with identity-lock cache headers."""
-    file_path = AVATARS_DIR / filename
-    if not file_path.exists() or not file_path.is_file():
-        from fastapi import HTTPException
+    file_path = _safe_file_path(AVATARS_DIR, filename)
+    if file_path is None:
         raise HTTPException(status_code=404, detail="Avatar not found")
     return FileResponse(
         file_path,
@@ -87,9 +97,8 @@ GALLERY_DIR = Path(__file__).parent.parent / "storage" / "gallery"
 @app.get("/api/v1/gallery/{filename}")
 async def serve_gallery(filename: str):
     """Serve gallery variation images."""
-    file_path = GALLERY_DIR / filename
-    if not file_path.exists() or not file_path.is_file():
-        from fastapi import HTTPException
+    file_path = _safe_file_path(GALLERY_DIR, filename)
+    if file_path is None:
         raise HTTPException(status_code=404, detail="Gallery image not found")
     return FileResponse(
         file_path,
@@ -108,9 +117,8 @@ SHOOTS_DIR = Path(__file__).parent.parent / "storage" / "shoots"
 @app.get("/api/v1/shoots/{shoot_id}/images/{filename}")
 async def serve_shoot_image(shoot_id: str, filename: str):
     """Serve photoshoot images."""
-    file_path = SHOOTS_DIR / shoot_id / filename
-    if not file_path.exists() or not file_path.is_file():
-        from fastapi import HTTPException
+    file_path = _safe_file_path(SHOOTS_DIR, shoot_id, filename)
+    if file_path is None:
         raise HTTPException(status_code=404, detail="Shoot image not found")
     return FileResponse(
         file_path,
@@ -129,9 +137,8 @@ async def serve_adult_content(persona_id: str, filename: str):
     
     Requires age verification cookie in production.
     """
-    file_path = ADULT_DIR / persona_id / filename
-    if not file_path.exists() or not file_path.is_file():
-        from fastapi import HTTPException
+    file_path = _safe_file_path(ADULT_DIR, persona_id, filename)
+    if file_path is None:
         raise HTTPException(status_code=404, detail="Content not found")
     return FileResponse(
         file_path,

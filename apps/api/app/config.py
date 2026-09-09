@@ -10,9 +10,6 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite+aiosqlite:///./persona_studio.db"
     DATABASE_URL_SYNC: str = "sqlite:///./persona_studio.db"
 
-    # Redis
-    REDIS_URL: str = "redis://localhost:6379/0"
-
     # MinIO / Object Storage
     MINIO_ENDPOINT: str = "localhost:9000"
     MINIO_ACCESS_KEY: str = "persona"
