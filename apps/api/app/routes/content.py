@@ -425,6 +425,11 @@ async def generate_adult_content(
     if not result["success"]:
         raise HTTPException(502, f"Generation failed: {result.get('error', 'unknown')}")
     
+    # Content moderation check
+    from app.providers.moderation import get_moderator
+    moderator = get_moderator()
+    moderation_result = await moderator.classify_image(output_path)
+    
     # Log for audit trail
     import hashlib
     content_hash = hashlib.sha256(open(output_path, "rb").read()).hexdigest()[:16]
@@ -437,6 +442,11 @@ async def generate_adult_content(
         "prompt": full_prompt,
         "size_bytes": result["size_bytes"],
         "persona_id": str(persona_id),
+        "moderation": {
+            "safe": moderation_result["safe"],
+            "nsfw_score": moderation_result["nsfw_score"],
+            "label": moderation_result["label"],
+        },
         "metadata": {
             "adult_verified": True,
             "synthetic_identity": True,
@@ -653,6 +663,16 @@ async def _run_auto_produce(
                     seed_override=hash(f"{shoot_id.hex}_{i}") % 2147483647,
                 )
                 if result["success"]:
+                    # Content moderation check
+                    from app.providers.moderation import get_moderator
+                    moderator = get_moderator()
+                    mod_result = await moderator.classify_image(output_path)
+                    if not mod_result["safe"]:
+                        logger.warning(
+                            "moderation_flagged",
+                            path=output_path,
+                            nsfw_score=mod_result["nsfw_score"],
+                        )
                     # Store as relative path for the image serving endpoint
                     rel = f"storage/shoots/{shoot_id.hex[:8]}/shot_{i+1:02d}.png"
                     shoot_images.append(rel)

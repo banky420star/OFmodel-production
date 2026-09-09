@@ -6,9 +6,8 @@ Supports image-to-video and text-to-video via the cloud API.
 API docs: https://www.alibabacloud.com/help/en/model-studio/text-to-video-api-reference
 
 Models:
-  - wan2.7-t2v: Text-to-video (latest, 2-15s, 720p/1080p)
-  - wan2.1-i2v-t214p: Image-to-video
-  - wan2.1-t2v-t214p: Text-to-video (older)
+  - wan2.1-t2v-turbo: Text-to-video (confirmed working, 5s, 720p)
+  - wan2.1-i2v-turbo: Image-to-video
 
 NOTE: sk-ws-* keys are valid DashScope pay-as-you-go keys.
 """
@@ -39,13 +38,11 @@ DASHSCOPE_BASE = DASHSCOPE_BASES[0]
 TASK_SUBMIT_URL = f"{DASHSCOPE_BASE}/api/v1/services/aigc/video-generation/video-synthesis"
 TASK_STATUS_URL = f"{DASHSCOPE_BASE}/api/v1/tasks"
 
-# Models — Wan 2.7 (latest, supports 1080P, multi-shot, audio)
-# API docs: https://www.alibabacloud.com/help/en/model-studio/text-to-video-api-reference
-WAN_T2V_MODEL = "wan2.7-t2v-2026-06-12"  # Text-to-video (latest)
-WAN_I2V_MODEL = "wan2.7-i2v-2026-04-25"  # Image-to-video (latest)
-# Fallback models (older)
-WAN_T2V_MODEL_FALLBACK = "wan2.1-t2v-t214p"
-WAN_I2V_MODEL_FALLBACK = "wan2.1-i2v-t214p"
+# Models — confirmed working with sk-ws-* keys
+WAN_T2V_MODEL = "wan2.1-t2v-turbo"          # Text-to-video (confirmed working)
+WAN_I2V_MODEL = "wan2.1-i2v-turbo"          # Image-to-video
+WAN_T2V_MODEL_FALLBACK = "wan2.1-t2v-turbo"  # Same as primary
+WAN_I2V_MODEL_FALLBACK = "wan2.1-i2v-turbo"  # Same as primary
 
 
 class DashScopeWanProvider(VideoProvider):
@@ -133,11 +130,11 @@ class DashScopeWanProvider(VideoProvider):
             if negative_prompt:
                 input_data["negative_prompt"] = negative_prompt
 
+            # Use size format that DashScope actually accepts
+            size = f"{width}*{height}"
             params = {
-                "resolution": resolution,
-                "ratio": ratio,
+                "size": size,
                 "duration": dur_sec,
-                "prompt_extend": True,
             }
 
             payload = {
@@ -315,9 +312,8 @@ class DashScopeWanProvider(VideoProvider):
                 "model": WAN_I2V_MODEL,
                 "input": input_data,
                 "parameters": {
-                    "resolution": resolution,
+                    "size": "1280*720",
                     "duration": dur_sec,
-                    "prompt_extend": True,
                 },
             }
 

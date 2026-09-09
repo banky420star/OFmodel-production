@@ -742,11 +742,176 @@ async def signup_tiktok(
             )
 
 
+
+async def signup_onlyfans(
+    email: str,
+    password: str,
+    display_name: str,
+    username: str,
+    *,
+    headless: bool = True,
+    timeout_ms: int = 30000,
+) -> SignupResult:
+    """
+    Automate OnlyFans account signup via web.
+    """
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        return SignupResult(
+            success=False,
+            platform="onlyfans",
+            username=username,
+            email=email,
+            status="error",
+            message="Playwright not installed",
+        )
+
+    logger.info(f"Starting OnlyFans signup for @{username} ({email})")
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=headless,
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+        )
+
+        context = await browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1280, "height": 800},
+            locale="en-US",
+        )
+
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        """)
+
+        page = await context.new_page()
+
+        try:
+            await page.goto(
+                "https://onlyfans.com/register",
+                wait_until="networkidle",
+                timeout=timeout_ms,
+            )
+            await asyncio.sleep(3)
+
+            screenshot_path = f"/tmp/of_signup_1_{username}.png"
+            await page.screenshot(path=screenshot_path)
+
+            # Fill email
+            email_input = page.locator('input[name="email"], input[type="email"], input[placeholder*="Email" i]')
+            if await email_input.count() > 0:
+                await email_input.first.fill(email)
+                await asyncio.sleep(0.5)
+
+            # Fill username
+            username_input = page.locator('input[name="username"], input[placeholder*="Username" i]')
+            if await username_input.count() > 0:
+                await username_input.first.fill(username)
+                await asyncio.sleep(0.5)
+
+            # Fill password
+            pass_input = page.locator('input[type="password"], input[name="password"]')
+            if await pass_input.count() > 0:
+                await pass_input.first.fill(password)
+                await asyncio.sleep(1)
+
+            screenshot_path = f"/tmp/of_signup_2_{username}.png"
+            await page.screenshot(path=screenshot_path)
+
+            # Submit
+            submit = page.locator('button[type="submit"], button:has-text("Register"), button:has-text("Sign Up"), button:has-text("Continue")')
+            if await submit.count() > 0:
+                await submit.first.click()
+                await asyncio.sleep(5)
+            else:
+                await page.keyboard.press("Enter")
+                await asyncio.sleep(5)
+
+            screenshot_path = f"/tmp/of_signup_3_{username}.png"
+            await page.screenshot(path=screenshot_path)
+
+            # Check result
+            current_url = page.url
+            cookies = await context.cookies()
+
+            if "confirm" in current_url or "verify" in current_url or "check" in current_url:
+                await browser.close()
+                return SignupResult(
+                    success=True,
+                    platform="onlyfans",
+                    username=username,
+                    email=email,
+                    status="verification_needed",
+                    message="Signup submitted — email verification pending",
+                    screenshot_path=screenshot_path,
+                    session_cookies=cookies,
+                )
+
+            # Check for CAPTCHA
+            captcha = page.locator('div:has-text("Verify"), iframe[src*="captcha"], div:has-text("Security check")')
+            if await captcha.count() > 0:
+                await browser.close()
+                return SignupResult(
+                    success=False,
+                    platform="onlyfans",
+                    username=username,
+                    email=email,
+                    status="captcha_blocked",
+                    message="CAPTCHA detected",
+                    screenshot_path=screenshot_path,
+                    session_cookies=cookies,
+                )
+
+            page_text = await page.inner_text("body")
+            await browser.close()
+
+            return SignupResult(
+                success=True,
+                platform="onlyfans",
+                username=username,
+                email=email,
+                status="verification_needed",
+                message="Signup flow completed — check email",
+                screenshot_path=screenshot_path,
+                session_cookies=cookies,
+            )
+
+        except Exception as e:
+            logger.error(f"OnlyFans signup error: {e}")
+            try:
+                screenshot_path = f"/tmp/of_signup_error_{username}.png"
+                await page.screenshot(path=screenshot_path)
+            except Exception:
+                screenshot_path = ""
+            cookies = []
+            try:
+                cookies = await context.cookies()
+            except Exception:
+                pass
+            await browser.close()
+            return SignupResult(
+                success=False,
+                platform="onlyfans",
+                username=username,
+                email=email,
+                status="error",
+                message=f"Error: {str(e)[:200]}",
+                screenshot_path=screenshot_path,
+                session_cookies=cookies,
+            )
+
+
 # Platform dispatcher
 SIGNUP_HANDLERS = {
     "instagram": signup_instagram,
     "facebook": signup_facebook,
     "tiktok": signup_tiktok,
+    "onlyfans": signup_onlyfans,
 }
 
 
