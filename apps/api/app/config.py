@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
 
+    # Auth gate — shared operator bearer token for /api/v1.
+    # Empty/unset = auth disabled (local dev + tests).
+    API_AUTH_TOKEN: str = ""
+
     # Provider configuration
     PROVIDER_REGISTRY: str = "mock"  # mock | comfyui | elevenlabs | wan | ollama
 

@@ -60,6 +60,7 @@ services:
       GPU_WORKER_URL: ${GPU_WORKER_URL:-}
       OLLAMA_URL: ${OLLAMA_URL:-}
       WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:3000}
+      API_AUTH_TOKEN: ${API_AUTH_TOKEN:-}
     depends_on:
       postgres:
         condition: service_healthy

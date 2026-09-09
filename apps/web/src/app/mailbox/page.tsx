@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { listMailboxes } from '@/lib/api'
+import { listMailboxes, mediaUrl } from '@/lib/api'
 import { Icons } from '@/lib/icons'
 
 interface Mailbox {
@@ -103,7 +103,7 @@ export default function MailboxPage() {
                       fontSize: 20, fontWeight: 700, color: 'var(--green)', flexShrink: 0,
                     }}>
                       {mb.avatar_url ? (
-                        <img src={mb.avatar_url} alt={mb.persona_name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                        <img src={mediaUrl(mb.avatar_url)} alt={mb.persona_name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                       ) : (
                         mb.persona_name.charAt(0).toUpperCase()
                       )}

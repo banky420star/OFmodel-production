@@ -5,12 +5,13 @@ The main application with all 14 phases implemented.
 
 import os
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pathlib import Path
 import structlog
 
+from app.auth import require_api_token, require_media_token
 from app.config import get_settings
 from app.database import init_db
 from app.routes import router
@@ -56,14 +57,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(router, prefix="/api/v1")
-app.include_router(jobs_router, prefix="/api/v1")
+app.include_router(router, prefix="/api/v1", dependencies=[Depends(require_api_token)])
+app.include_router(jobs_router, prefix="/api/v1", dependencies=[Depends(require_api_token)])
 
 # Avatar static files
 AVATARS_DIR = Path(__file__).parent.parent / "storage" / "avatars"
 
 
-@app.get("/api/v1/avatars/{filename}")
+@app.get("/api/v1/avatars/{filename}", dependencies=[Depends(require_media_token)])
 async def serve_avatar(filename: str):
     """Serve persona avatar images with identity-lock cache headers."""
     file_path = AVATARS_DIR / filename
@@ -84,7 +85,7 @@ async def serve_avatar(filename: str):
 GALLERY_DIR = Path(__file__).parent.parent / "storage" / "gallery"
 
 
-@app.get("/api/v1/gallery/{filename}")
+@app.get("/api/v1/gallery/{filename}", dependencies=[Depends(require_media_token)])
 async def serve_gallery(filename: str):
     """Serve gallery variation images."""
     file_path = GALLERY_DIR / filename
@@ -105,7 +106,7 @@ async def serve_gallery(filename: str):
 SHOOTS_DIR = Path(__file__).parent.parent / "storage" / "shoots"
 
 
-@app.get("/api/v1/shoots/{shoot_id}/images/{filename}")
+@app.get("/api/v1/shoots/{shoot_id}/images/{filename}", dependencies=[Depends(require_media_token)])
 async def serve_shoot_image(shoot_id: str, filename: str):
     """Serve photoshoot images."""
     file_path = SHOOTS_DIR / shoot_id / filename
@@ -123,7 +124,7 @@ async def serve_shoot_image(shoot_id: str, filename: str):
 ADULT_DIR = Path(__file__).parent.parent / "storage" / "adult_content"
 
 
-@app.get("/api/v1/adult-content/{persona_id}/{filename}")
+@app.get("/api/v1/adult-content/{persona_id}/{filename}", dependencies=[Depends(require_media_token)])
 async def serve_adult_content(persona_id: str, filename: str):
     """Serve adult content images.
     
