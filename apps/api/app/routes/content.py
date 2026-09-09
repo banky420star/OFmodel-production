@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import json
+import logging
 import time
 import random
 from pathlib import Path
@@ -33,6 +34,8 @@ from app.workflows.content_flow import (
 from app.providers.registry import get_registry
 
 router = APIRouter()
+
+logger = logging.getLogger(__name__)
 
 @router.get("/shoots", response_model=list[ShootResponse])
 async def list_shoots(

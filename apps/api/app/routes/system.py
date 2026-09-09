@@ -10,12 +10,12 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Form
-from sqlalchemy import select, func, text
+from sqlalchemy import select, func, text, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models import (
-    Workflow, WorkflowStep, Job, Persona, QAResult,
+    Workflow, WorkflowStep, Job, Persona, QAResult, Identity,
     WorkflowStatus,
 )
 from app.schemas import (
@@ -110,8 +110,21 @@ async def get_job(job_id: UUID, db: AsyncSession = Depends(get_db)):
 
 @router.get("/personas/{persona_id}/qa", response_model=list[QAResponse])
 async def list_qa_results(persona_id: UUID, db: AsyncSession = Depends(get_db)):
+    # QAResult has no persona_id column — reach it through the persona's
+    # identities (identity_id) or its workflows (workflow_id).
     result = await db.execute(
-        select(QAResult).where(QAResult.persona_id == persona_id).order_by(QAResult.created_at.desc())
+        select(QAResult)
+        .where(
+            or_(
+                QAResult.identity_id.in_(
+                    select(Identity.id).where(Identity.persona_id == persona_id)
+                ),
+                QAResult.workflow_id.in_(
+                    select(Workflow.id).where(Workflow.persona_id == persona_id)
+                ),
+            )
+        )
+        .order_by(QAResult.created_at.desc())
     )
     return result.scalars().all()
 
