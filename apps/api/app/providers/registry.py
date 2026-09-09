@@ -5,6 +5,7 @@ This is the central place where provider swapping happens.
 
 Environment variables:
   PROVIDER_REGISTRY = mock | comfyui | hybrid
+  PROVIDER_COOLDOWN_SECONDS = 900  (TTL blacklist after quota/rate failures)
   COMFYUI_URL = http://localhost:8188
   ELEVENLABS_API_KEY = sk_...
   WAN_VIDEO_URL = http://localhost:8080
@@ -14,17 +15,237 @@ Environment variables:
 """
 
 from __future__ import annotations
+import asyncio
+import logging
 import os
-from typing import Type
+import re
+import threading
+import time
 
 from app.providers.base import (
     LLMProvider, ImageProvider, VideoProvider, VoiceProvider,
-    TrainerProvider, StorageProvider,
+    TrainerProvider, StorageProvider, ProviderResult,
 )
 from app.providers.mocks import (
     MockLLMProvider, MockImageProvider, MockVideoProvider,
     MockVoiceProvider, MockTrainerProvider, MockStorageProvider,
 )
+
+logger = logging.getLogger(__name__)
+
+# TTL a provider is skipped after a quota/rate/unavailability failure
+# (PROVIDER_COOLDOWN_SECONDS). One default, shared by the registry chain.
+DEFAULT_PROVIDER_COOLDOWN_SECONDS = 900
+
+# Error fragments meaning "the provider is out of quota / rate limited /
+# otherwise unavailable right now" — the provider gets a TTL cooldown instead
+# of being failed permanently. HTTP status codes are matched on word
+# boundaries so a body mentioning "4290 bytes" is not mistaken for a 429.
+_QUOTA_ERROR_MARKERS = (
+    "quota", "rate limit", "ratelimit", "rate_limit", "too many requests",
+    "throttl", "exhausted", "billing", "payment required",
+)
+_AUTH_ERROR_MARKERS = (
+    "unauthorized", "forbidden", "invalid api key", "auth failed",
+    "authentication", "not authenticated",
+)
+_CONNECTIVITY_ERROR_MARKERS = (
+    "cannot connect", "connect error", "connection refused", "connection reset",
+    "connection closed", "unreachable", "timed out", "did not complete within",
+    "getaddrinfo failed", "network error", "no route to host",
+)
+_STATUS_CODE_PATTERN = re.compile(r"\b(?:401|403|429|503)\b")
+
+
+def _is_unavailable_error(error: str) -> bool:
+    """True if the error suggests the provider is temporarily unavailable."""
+    e = (error or "").lower()
+    if _STATUS_CODE_PATTERN.search(e):
+        return True
+    return any(
+        marker in e
+        for marker in _QUOTA_ERROR_MARKERS + _AUTH_ERROR_MARKERS + _CONNECTIVITY_ERROR_MARKERS
+    )
+
+
+class ChainImageProvider(ImageProvider):
+    """Tries image providers in priority order until one succeeds.
+
+    When a provider fails with a quota/rate/unavailability error it is
+    blacklisted for ``cooldown_seconds`` (PROVIDER_COOLDOWN_SECONDS, default
+    900) instead of permanently — later requests skip it while the cooldown
+    is active and automatically retry it once it expires. Each attempt is
+    capped at ``attempt_timeout`` seconds (PROVIDER_TIMEOUT_SECONDS) so one
+    down provider cannot stall a request for minutes.
+
+    The chain may be used concurrently (identity_engine runs it through
+    ThreadPoolExecutor + asyncio.run), so cooldown state is lock-guarded.
+    """
+
+    def __init__(
+        self,
+        providers: list[tuple[str, ImageProvider]],
+        cooldown_seconds: float = DEFAULT_PROVIDER_COOLDOWN_SECONDS,
+        attempt_timeout: float = 120.0,
+    ):
+        self._chain = providers
+        self._cooldown_seconds = max(0.0, float(cooldown_seconds))
+        # 0 disables the per-attempt timeout entirely
+        self._attempt_timeout = float(attempt_timeout) if attempt_timeout else None
+        self._lock = threading.Lock()
+        self._blocked_until: dict[str, float] = {}
+        self._provider = "image_chain(" + ",".join(name for name, _ in providers) + ")"
+
+    @property
+    def provider_names(self) -> list[str]:
+        return [name for name, _ in self._chain]
+
+    def _available(self) -> list[tuple[str, ImageProvider]]:
+        now = time.monotonic()
+        with self._lock:
+            self._blocked_until = {
+                name: until for name, until in self._blocked_until.items() if until > now
+            }
+            blocked = set(self._blocked_until)
+        return [(n, p) for n, p in self._chain if n not in blocked]
+
+    def _block(self, name: str) -> None:
+        with self._lock:
+            self._blocked_until[name] = time.monotonic() + self._cooldown_seconds
+
+    def _record_failure(self, name: str, error: str) -> None:
+        if _is_unavailable_error(error):
+            self._block(name)
+            logger.warning(
+                "provider_cooldown_started provider=%s cooldown_s=%s error=%s",
+                name, self._cooldown_seconds, (error or "")[:200],
+            )
+
+    async def _attempt(self, provider_call) -> ProviderResult:
+        """Run one provider call under the per-attempt timeout budget."""
+        if self._attempt_timeout:
+            return await asyncio.wait_for(provider_call(), timeout=self._attempt_timeout)
+        return await provider_call()
+
+    async def _try_chain(
+        self,
+        attempt,
+        candidates: list[tuple[str, ImageProvider]] | None = None,
+    ) -> ProviderResult:
+        """Run `attempt(provider)` against each candidate in priority order.
+
+        Each provider is tried at most once per call; a provider that fails
+        with a quota/rate/unavailability error is put on TTL cooldown. Returns
+        the last failure if every candidate fails.
+        """
+        if candidates is None:
+            candidates = self._available()
+        if not candidates:
+            return ProviderResult(
+                success=False,
+                error="No image provider available (all on cooldown)",
+                provider=self._provider,
+            )
+
+        last: ProviderResult | None = None
+        for name, provider in candidates:
+            try:
+                result = await self._attempt(lambda p=provider: attempt(p))
+            except asyncio.TimeoutError:
+                result = ProviderResult(
+                    success=False,
+                    error=f"{name} provider timed out after {self._attempt_timeout:.0f}s",
+                    provider=name,
+                )
+            except Exception as e:
+                result = ProviderResult(
+                    success=False, error=f"{name} provider error: {e}", provider=name
+                )
+            if result.success:
+                return result
+            last = result
+            self._record_failure(name, result.error)
+
+        return last  # type: ignore[return-value]  # candidates was non-empty
+
+    async def generate(
+        self,
+        prompt: str,
+        negative_prompt: str = "",
+        width: int = 1024,
+        height: int = 1024,
+        steps: int = 30,
+        cfg_scale: float = 7.0,
+        seed: int = -1,
+        lora_path: str = "",
+        lora_strength: float = 0.8,
+    ) -> ProviderResult:
+        return await self._try_chain(lambda p: p.generate(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            width=width,
+            height=height,
+            steps=steps,
+            cfg_scale=cfg_scale,
+            seed=seed,
+            lora_path=lora_path,
+            lora_strength=lora_strength,
+        ))
+
+    async def img2img(
+        self, image_key: str, prompt: str, strength: float = 0.75, **kwargs
+    ) -> ProviderResult:
+        return await self._try_chain(
+            lambda p: p.img2img(image_key, prompt, strength, **kwargs)
+        )
+
+    async def edit_image(
+        self,
+        reference_image_bytes: bytes,
+        prompt: str,
+        negative_prompt: str = "",
+        width: int = 1024,
+        height: int = 1024,
+        seed: int = -1,
+    ) -> ProviderResult:
+        candidates = self._available()
+        edit_capable = [(n, p) for n, p in candidates if hasattr(p, "edit_image")]
+        if not edit_capable:
+            # Never silently drop the reference image — identity lock depends
+            # on it. Fail explicitly instead of regenerating from text alone.
+            return ProviderResult(
+                success=False,
+                error=(
+                    "Image editing with a reference image is not supported by any "
+                    "configured image provider "
+                    f"({', '.join(n for n, _ in candidates) or 'none available'}); "
+                    "reference image was NOT applied"
+                ),
+                provider=self._provider,
+            )
+        return await self._try_chain(
+            lambda p: p.edit_image(
+                reference_image_bytes,
+                prompt,
+                negative_prompt=negative_prompt,
+                width=width,
+                height=height,
+                seed=seed,
+            ),
+            candidates=edit_capable,
+        )
+
+    async def upscale(self, image_key: str, scale: int = 2) -> ProviderResult:
+        return await self._try_chain(lambda p: p.upscale(image_key, scale))
+
+    async def health_check(self) -> ProviderResult:
+        available = self._available()
+        if not available:
+            return ProviderResult(
+                success=False, error="All image providers on cooldown",
+                provider=self._provider,
+            )
+        return await available[0][1].health_check()
 
 
 class ProviderRegistry:
@@ -60,14 +281,20 @@ class ProviderRegistry:
                 pass
         return self._get("llm", MockLLMProvider)
 
-    def get_image_provider(self) -> ImageProvider:
+    def _build_image_chain(self) -> list[tuple[str, ImageProvider]]:
+        """Build the prioritized image provider chain.
+
+        Priority: ComfyUI → DashScope → HuggingFace → Pollinations → Mock.
+        Mock is always last so generation never hard-fails offline.
+        """
+        chain: list[tuple[str, ImageProvider]] = []
         # Priority 1: ComfyUI (local GPU) — only if URL is explicitly set
         if self._mode in ("hybrid", "comfyui") and self._settings.COMFYUI_URL:
             try:
                 from app.providers.comfyui import ComfyUIImageProvider
-                return self._get("image", lambda: ComfyUIImageProvider(
+                chain.append(("comfyui", ComfyUIImageProvider(
                     base_url=self._settings.COMFYUI_URL
-                ))
+                )))
             except ImportError:
                 pass
         # Priority 2: DashScope Qwen-Image (same key as Wan video, up to 2048px)
@@ -75,19 +302,36 @@ class ProviderRegistry:
         if api_key:
             try:
                 from app.providers.dashscope_image import DashScopeImageProvider
-                return self._get("image", lambda: DashScopeImageProvider(api_key=api_key))
+                chain.append(("dashscope", DashScopeImageProvider(api_key=api_key)))
             except ImportError:
                 pass
-        # Priority 3: HuggingFace Inference API (free, no GPU needed)
-        if self._mode in ("hybrid", "huggingface", "hf"):
+        # Priority 3: HuggingFace Inference API — only with an API key
+        # (anonymous inference always 401s, so don't waste a round-trip)
+        hf_key = getattr(self._settings, "HUGGINGFACE_API_KEY", "")
+        if hf_key and self._mode in ("hybrid", "huggingface", "hf"):
             try:
                 from app.providers.huggingface import HuggingFaceImageProvider
-                return self._get("image", lambda: HuggingFaceImageProvider(
-                    api_key=getattr(self._settings, "HUGGINGFACE_API_KEY", ""),
-                ))
+                chain.append(("huggingface", HuggingFaceImageProvider(api_key=hf_key)))
             except ImportError:
                 pass
-        return self._get("image", MockImageProvider)
+        # Priority 4: Pollinations.ai (free, no key) — kept in the chain so
+        # generation still produces real images when DashScope quota is out
+        # and no other provider is configured.
+        try:
+            from app.providers.pollinations import PollinationsImageProvider
+            chain.append(("pollinations", PollinationsImageProvider()))
+        except ImportError:
+            pass
+        # Priority 5: Mock (always last — guarantees offline generation)
+        chain.append(("mock", self._get("mock_image", MockImageProvider)))
+        return chain
+
+    def get_image_provider(self) -> ImageProvider:
+        return self._get("image", lambda: ChainImageProvider(
+            self._build_image_chain(),
+            cooldown_seconds=self._settings.PROVIDER_COOLDOWN_SECONDS,
+            attempt_timeout=self._settings.PROVIDER_TIMEOUT_SECONDS,
+        ))
 
     def get_video_provider(self) -> VideoProvider:
         # DashScope cloud Wan (Alibaba Cloud) — highest priority if API key is set
@@ -178,8 +422,14 @@ class ProviderRegistry:
         report = {}
         for name, (getter, config_value) in providers_config.items():
             instance = getter()
-            is_mock = "mock" in type(instance).__name__.lower()
-            provider_name = getattr(instance, "_provider", type(instance).__name__).replace("mock_", "")
+            if isinstance(instance, ChainImageProvider):
+                names = instance.provider_names
+                # Mock mode is fully deterministic/offline — never report green
+                is_mock = all(n.startswith("mock") for n in names) or self._mode == "mock"
+                provider_name = "+".join(names)
+            else:
+                is_mock = "mock" in type(instance).__name__.lower()
+                provider_name = getattr(instance, "_provider", type(instance).__name__).replace("mock_", "")
             report[name] = {
                 "status": "green" if not is_mock or name in ("storage",) else "yellow",
                 "provider": provider_name,
