@@ -25,9 +25,14 @@ Thumbs.db
 
 # Build
 .next/
+.next-verify/
 out/
 dist/
 build/
+tsconfig.tsbuildinfo
+
+# Agent worktrees (stale, 2.5GB of copies)
+.claude/
 
 # Generated assets
 apps/api/storage/

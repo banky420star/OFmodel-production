@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     HF_IMAGE_MODEL: str = "black-forest-labs/FLUX.1-schnell"
     HF_IMG2IMG_MODEL: str = "stabilityai/stable-diffusion-xl-refiner-1.0"
 
+    # EachLabs each::sense (adult-capable image generation)
+    EACHLABS_API_KEY: str = ""
+    EACHSENSE_MODE: str = "max"  # max | eco
+
     # Instagram Graph API
     INSTAGRAM_ACCESS_TOKEN: str = ""
     INSTAGRAM_ACCOUNT_ID: str = ""  # The Instagram Business Account ID (numeric)
@@ -47,6 +51,18 @@ class Settings(BaseSettings):
     # Workflow engine
     MAX_CONCURRENT_WORKFLOWS: int = 10
     WORKFLOW_STEP_TIMEOUT_SECONDS: int = 300
+
+    # Always-on social worker (official platform APIs ONLY — see
+    # app/providers/social_apis.py for the capability matrix; platforms
+    # without an official API are never integrated)
+    SOCIAL_WORKER_ENABLED: bool = True
+    SOCIAL_WORKER_INTERVAL_SECONDS: int = 300
+
+    # Official platform API credentials (account-level tokens are stored on
+    # each social account row via /social-worker/connect-api; these globals
+    # are an optional fallback for single-account setups)
+    FANVUE_ACCESS_TOKEN: str = ""
+    X_BEARER_TOKEN: str = ""
 
     class Config:
         env_file = str(Path(__file__).resolve().parent.parent.parent.parent / ".env")

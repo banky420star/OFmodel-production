@@ -89,14 +89,20 @@ async def generate_shoot_images_handler(
 
     generated = []
     img = _get_image()
+    # Identity lock: session_id keeps the same character consistent across
+    # all shots in this shoot (each::sense supports session-based consistency).
+    identity_session = input_data.get("identity_session_id") or (
+        f"persona-{input_data.get('persona_id', 'anon')}-shoot-{shoot_id or 'new'}"
+    )
     for i in range(image_count):
         result = await img.generate(
             prompt=f"{theme} lifestyle photo, professional, high quality, shot {i+1}",
             negative_prompt="blurry, low quality",
             seed=random.randint(0, 2**31),
+            session_id=identity_session,
         )
         if result.success:
-            img = GeneratedImage(
+            gen_img = GeneratedImage(
                 id=uuid4(),
                 workflow_id=workflow_id,
                 prompt=result.data.get("prompt", ""),
@@ -105,8 +111,8 @@ async def generate_shoot_images_handler(
                 generation_time_ms=result.data.get("generation_time_ms", 0),
                 metadata_json={"shoot_id": shoot_id, "shot_index": i, "is_mock": True},
             )
-            db.add(img)
-            generated.append(str(img.id))
+            db.add(gen_img)
+            generated.append(str(gen_img.id))
 
     # Update shoot
     if shoot_id:

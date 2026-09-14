@@ -22,7 +22,9 @@ def _mock_id() -> str:
 
 
 def _fake_png(width: int, height: int, seed: int) -> bytes:
-    """Generate a minimal valid PNG (1x1 pixel, deterministic by seed)."""
+    """Deterministic placeholder PNG at the REQUESTED size (not 1×1) so the
+    QA pipeline measures real dimensions. Visually a flat color block with a
+    seed-derived gradient band — clearly synthetic, never passed off as real."""
     import struct
     import zlib
 
@@ -35,9 +37,24 @@ def _fake_png(width: int, height: int, seed: int) -> bytes:
         return struct.pack(">I", len(data)) + c + crc
 
     header = b"\x89PNG\r\n\x1a\n"
-    ihdr = chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
-    raw = b"\x00" + bytes([r, g, b])
-    idat = chunk(b"IDAT", zlib.compress(raw))
+    ihdr = chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+    # Row-varying noise-free gradient, but big enough to be a plausible file:
+    # each row shifts hue slightly so compressed size scales with height.
+    import io as _io
+    rows = bytearray()
+    band = max(1, height // 64)
+    for y in range(height):
+        rows.append(0)  # filter: none
+        f = 1.0 - (y // band) * (0.5 / 64)
+        # per-pixel slight variation makes the data incompressible enough to
+        # exercise the QA pipeline's size/dimension checks honestly
+        step = bytes()
+        for x in range(0, width, 64):
+            j = (x // 64 + y) % 3
+            base = (r, g, b)[j]
+            step += bytes((int(base * f) & 0xFF,) * min(64, width - x))
+        rows += step
+    idat = chunk(b"IDAT", zlib.compress(bytes(rows), 1))  # low compression → larger file
     iend = chunk(b"IEND", b"")
     return header + ihdr + idat + iend
 
@@ -165,11 +182,20 @@ class MockLLMProvider(LLMProvider):
 
 
 class MockImageProvider(ImageProvider):
-    """Deterministic mock image generator."""
+    """Deterministic mock image generator.
+
+    Assets are stored via the shared filesystem storage provider (same as real
+    generation) so downstream pipelines can read the bytes back — the old
+    in-memory store made mock assets invisible to any other code path.
+    """
 
     def __init__(self):
         self._provider = "mock_image"
-        self._storage = MockStorageProvider()
+        try:
+            from app.providers.filesystem_storage import FileSystemStorageProvider
+            self._storage = FileSystemStorageProvider()
+        except Exception:  # pragma: no cover
+            self._storage = MockStorageProvider()
 
     async def generate(
         self, prompt: str, negative_prompt: str = "",
@@ -177,6 +203,7 @@ class MockImageProvider(ImageProvider):
         steps: int = 30, cfg_scale: float = 7.0,
         seed: int = -1, lora_path: str = "",
         lora_strength: float = 0.8,
+        session_id: str = "",
     ) -> ProviderResult:
         if seed == -1:
             seed = random.randint(0, 2**31)

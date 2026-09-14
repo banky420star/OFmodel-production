@@ -24,6 +24,7 @@ export default function ChatPage() {
   const [fans, setFans] = useState<Fan[]>([])
   const [selectedFan, setSelectedFan] = useState<Fan | null>(null)
   const [messages, setMessages] = useState<ChatMsg[]>([])
+  const [sendError, setSendError] = useState<string | null>(null)
   const [inputText, setInputText] = useState('')
   const [loading, setLoading] = useState(true)
   const [sending, setSending] = useState(false)
@@ -64,19 +65,15 @@ export default function ChatPage() {
     setMessages(prev => [...prev, tempMsg])
 
     try {
-      const reply = await autoReply(selectedFan.id, text)
-      setMessages(prev => [
-        ...prev.filter(m => m.id !== 'temp'),
-        { ...tempMsg, id: 'inbound-' + Date.now() },
-        {
-          id: 'outbound-' + Date.now(), direction: 'outbound',
-          content: reply.reply, message_type: 'text',
-          is_ai_generated: true, is_ppv: false, ppv_price: 0,
-          sentiment: reply.sentiment, intent: reply.intent,
-          created_at: new Date().toISOString(),
-        },
-      ])
-    } catch { setMessages(prev => prev.filter(m => m.id !== 'temp')) }
+      await autoReply(selectedFan.id, text)
+      // Reload from the server so what you see is what was actually stored
+      const msgs = await listFanMessages(selectedFan.id)
+      setMessages(msgs)
+    } catch {
+      setMessages(prev => prev.filter(m => m.id !== 'temp'))
+      setSendError('Message failed to send — check that the API and Ollama are running')
+      setTimeout(() => setSendError(null), 6000)
+    }
     setSending(false)
   }
 
@@ -244,20 +241,30 @@ export default function ChatPage() {
                 </div>
 
                 {/* Input */}
-                <div style={{ padding: '12px 18px', borderTop: '1px solid var(--border)', display: 'flex', gap: 8 }}>
-                  <input
-                    value={inputText}
-                    onChange={e => setInputText(e.target.value)}
-                    onKeyDown={e => e.key === 'Enter' && handleSend()}
-                    placeholder="Type a message..."
-                    style={{
-                      flex: 1, padding: '10px 14px', borderRadius: 8, border: '1px solid var(--border)',
-                      background: 'var(--bg-card)', color: 'var(--text)', fontSize: 13,
-                    }}
-                  />
-                  <button className="primary-button" onClick={handleSend} disabled={!inputText.trim() || sending}>
-                    Send
-                  </button>
+                <div style={{ padding: '12px 18px', borderTop: '1px solid var(--border)' }}>
+                  {sendError && (
+                    <div style={{
+                      marginBottom: 8, padding: '8px 12px', borderRadius: 8, fontSize: 12,
+                      background: 'rgba(239,68,68,0.12)', color: '#f87171', border: '1px solid rgba(239,68,68,0.3)',
+                    }}>
+                      ✗ {sendError}
+                    </div>
+                  )}
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <input
+                      value={inputText}
+                      onChange={e => setInputText(e.target.value)}
+                      onKeyDown={e => e.key === 'Enter' && handleSend()}
+                      placeholder="Type a message..."
+                      style={{
+                        flex: 1, padding: '10px 14px', borderRadius: 8, border: '1px solid var(--border)',
+                        background: 'var(--bg-card)', color: 'var(--text)', fontSize: 13,
+                      }}
+                    />
+                    <button className="primary-button" onClick={handleSend} disabled={!inputText.trim() || sending}>
+                      Send
+                    </button>
+                  </div>
                 </div>
               </>
             ) : (

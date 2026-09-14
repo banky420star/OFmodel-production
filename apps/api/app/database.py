@@ -45,9 +45,12 @@ async def init_db():
             cur.execute("PRAGMA journal_mode=WAL")
             cur.execute("PRAGMA synchronous=NORMAL")
             cur.close()
-    from app.models import Base as ModelBase  # noqa
+    from app.models import Base as ModelBase, reconcile_identity_locks  # noqa
     async with engine.begin() as conn:
         await conn.run_sync(ModelBase.metadata.create_all)
+    # SQLite create_all never ALTERs an existing table; reconcile legacy
+    # identity_locks so new lock rows can actually be inserted.
+    await reconcile_identity_locks(engine)
 
 
 async def get_db() -> AsyncSession:

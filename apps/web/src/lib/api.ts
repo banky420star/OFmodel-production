@@ -9,7 +9,14 @@ async function apiFetch(path: string, options: RequestInit = {}) {
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`API ${res.status}: ${text}`);
+    let detail: unknown = text;
+    try { detail = JSON.parse(text).detail ?? text; } catch { /* keep raw text */ }
+    const msg = typeof detail === 'string'
+      ? detail
+      : Array.isArray(detail)
+        ? detail.map((d: any) => d?.msg?.replace(/^Value error, /, '') || JSON.stringify(d)).join('; ')
+        : JSON.stringify(detail);
+    throw new Error(`API ${res.status}: ${msg}`);
   }
   return res.json();
 }
@@ -19,13 +26,25 @@ export const createPersona = (data: any) => apiFetch('/personas', { method: 'POS
 export const getPersona = (id: string) => apiFetch(`/personas/${id}`);
 export const listPersonas = () => apiFetch('/personas');
 
+// Model managers (API prefix: /manager)
+export const listManagers = () => apiFetch('/manager');
+export const managerDashboard = (personaId: string) => apiFetch(`/manager/personas/${personaId}/dashboard`);
+export const startManager = (personaId: string) => apiFetch(`/manager/personas/${personaId}/start`, { method: 'POST' });
+export const wakeManager = (personaId: string, source = 'manual') => apiFetch(`/manager/personas/${personaId}/wake?source=${source}`, { method: 'POST' });
+export const pauseManager = (personaId: string) => apiFetch(`/manager/personas/${personaId}/pause`, { method: 'POST' });
+export const resumeManager = (personaId: string) => apiFetch(`/manager/personas/${personaId}/resume`, { method: 'POST' });
+export const managerRunNow = (personaId: string, taskType: string) => apiFetch(`/manager/personas/${personaId}/run-now?task_type=${taskType}`, { method: 'POST' });
+export const retryManagerFailed = (personaId: string) => apiFetch(`/manager/personas/${personaId}/retry-failed`, { method: 'POST' });
+export const setManagerAutonomy = (personaId: string, level: number) => apiFetch(`/manager/personas/${personaId}/autonomy?level=${level}`, { method: 'POST' });
+
 // Identities
 export const listIdentities = (personaId: string) => apiFetch(`/personas/${personaId}/identities`);
 
 // Shoots
 export const createShoot = (personaId: string, data: any) =>
   apiFetch(`/personas/${personaId}/shoots`, { method: 'POST', body: JSON.stringify(data) });
-export const listShoots = (personaId: string) => apiFetch(`/personas/${personaId}/shoots`);
+export const listShoots = (personaId: string) => apiFetch(`/shoots?persona_id=${personaId}`);
+export const getShootImages = (shootId: string) => apiFetch(`/shoots/${shootId}/images`);
 
 // Content Packs
 export const createPack = (personaId: string, data: any) =>
@@ -65,6 +84,45 @@ export const getGallery = (personaId: string) => apiFetch(`/personas/${personaId
 
 // Dashboard
 export const getDashboardSummary = () => apiFetch('/dashboard/summary');
+
+// Fanvue Platform Manager (compliance-gated inventory)
+export const listPlatformAccounts = () => apiFetch('/platform/accounts');
+export const createPlatformAccount = (data: {
+  persona_id: string; platform?: string; handle?: string; subscription_price?: number;
+  is_ai_disclosed: boolean; kyc_status: string; consent_owner: string;
+  target_public_posts_per_day?: number; target_subscriber_posts_per_day?: number;
+  target_premium_items_per_week?: number;
+}) => apiFetch('/platform/accounts', { method: 'POST', body: JSON.stringify(data) });
+export const getPlatformAccount = (id: string) => apiFetch(`/platform/accounts/${id}`);
+export const patchPlatformAccount = (id: string, data: Record<string, unknown>) =>
+  apiFetch(`/platform/accounts/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
+export const getPlatformInventory = (id: string, tier?: string) =>
+  apiFetch(`/platform/accounts/${id}/inventory${tier ? `?tier=${tier}` : ''}`);
+export const syncPlatformGallery = (id: string) =>
+  apiFetch(`/platform/accounts/${id}/inventory/sync-gallery`, { method: 'POST' });
+export const planPlatformInventory = (id: string) =>
+  apiFetch(`/platform/inventory/plan?account_id=${id}`, { method: 'POST' });
+export const listPlatformOrders = (id: string) => apiFetch(`/platform/accounts/${id}/orders`);
+export const postPlatformInventoryItem = (itemId: string) =>
+  apiFetch(`/platform/inventory/${itemId}/post`, { method: 'POST' });
+
+// Full-auto social signup (robot fills form, polls inbox, types the code)
+export const startFullAutoSignup = (accountId: string) =>
+  apiFetch(`/social-accounts/${accountId}/fullauto-signup`, { method: 'POST' });
+export const getFullAutoSignupStatus = (accountId: string) =>
+  apiFetch(`/social-accounts/${accountId}/fullauto-status`);
+
+// Always-on social worker (official platform APIs ONLY — Fanvue, X; Fansly/
+// OnlyFans have no official API and are never integrated)
+export const getSocialWorkerStatus = () => apiFetch('/social-worker/status');
+export const runSocialWorkerOnce = () => apiFetch('/social-worker/run-once', { method: 'POST' });
+export const connectSocialApi = (platform: string, username: string, token: string, tokenKind = 'oauth_access_token') =>
+  apiFetch('/social-worker/connect-api', {
+    method: 'POST',
+    body: JSON.stringify({ platform, username, token, token_kind: tokenKind }),
+  });
+export const disconnectSocialApi = (accountId: string) =>
+  apiFetch(`/social-worker/${accountId}/disconnect`, { method: 'POST' });
 
 // Jobs
 export const getJob = (jobId: string) => apiFetch(`/jobs/${jobId}`);
@@ -150,23 +208,12 @@ export const requestSocialAccount = (params: {
 };
 
 export const approveSocialAccount = (accountId: string, notes?: string) => {
-  const qs = new URLSearchParams();
-  if (notes) qs.set('notes', notes);
-  return apiFetch(`/social-accounts/${accountId}/approve`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: qs,
-  });
+  const params = notes ? `?notes=${encodeURIComponent(notes)}` : '';
+  return apiFetch(`/social-accounts/${accountId}/approve${params}`, { method: 'POST' });
 };
 
-export const rejectSocialAccount = (accountId: string, reason: string) => {
-  const qs = new URLSearchParams({ reason });
-  return apiFetch(`/social-accounts/${accountId}/reject`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: qs,
-  });
-};
+export const rejectSocialAccount = (accountId: string, reason: string) =>
+  apiFetch(`/social-accounts/${accountId}/reject?reason=${encodeURIComponent(reason)}`, { method: 'POST' });
 
 export const activateSocialAccount = (accountId: string) =>
   apiFetch(`/social-accounts/${accountId}/activate`, {

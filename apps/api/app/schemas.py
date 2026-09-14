@@ -57,6 +57,7 @@ class PersonaResponse(BaseModel):
     packs_count: int = 0
     avatar_url: str = ""
     job_id: UUID | None = None
+    metadata_json: dict = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
 
@@ -144,6 +145,7 @@ class WorkflowStepResponse(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     error_message: str
+    output_data: dict = {}
 
     class Config:
         from_attributes = True

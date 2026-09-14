@@ -132,9 +132,12 @@ class DashScopeWanProvider(VideoProvider):
 
             # Use size format that DashScope actually accepts
             size = f"{width}*{height}"
+            # NOTE: duration must NOT be sent — wan2.1-t2v-turbo rejects it
+            # ("duration customization is not supported", InvalidParameter).
+            # The model returns its fixed clip length (~5s); we record the
+            # real duration from the result metadata after download.
             params = {
                 "size": size,
-                "duration": dur_sec,
             }
 
             payload = {

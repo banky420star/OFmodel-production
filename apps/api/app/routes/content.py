@@ -1,9 +1,12 @@
 """Persona Studio — content routes."""
 
 from __future__ import annotations
+import hashlib
 import json
+import logging
 import time
 import random
+import asyncio
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import Any
@@ -11,15 +14,17 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Form
 from pydantic import BaseModel
-from sqlalchemy import select, func, text
+from sqlalchemy import select, func, text, String as SAString, cast as sa_cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
-DB_PATH = Path(__file__).parent.parent.parent / "persona_studio.db"
+logger = logging.getLogger("persona_studio.content")
 
 from app.database import get_db
 from app.models import (
     Persona, Shoot, ContentPack, GeneratedVideo, GeneratedVoice,
-    ShootStatus, ContentPackStatus, Identity,
+    ShootStatus, ContentPackStatus, Identity, Job, IdentityLock,
+    IdentityLockStatus, persona_storage_hex, ensure_identity_lock,
+    persona_ready_for_production,
 )
 from app.schemas import (
     ShootCreate, ShootResponse, ContentPackCreate, ContentPackResponse,
@@ -55,18 +60,19 @@ async def get_shoot_images(shoot_id: str, db: AsyncSession = Depends(get_db)):
     # Try full UUID first, then short hex lookup
     shoot = None
     try:
-        shoot = await db.get(Shoot, shoot_id)
-    except Exception:
-        pass
+        shoot = await db.get(Shoot, UUID(shoot_id))
+    except (ValueError, TypeError, AttributeError):
+        shoot = None
     if not shoot:
-        # Short hex — search by text prefix
-        import sqlite3 as _sqlite3
-        conn = _sqlite3.connect(str(DB_PATH))
-        row = conn.execute("SELECT id FROM shoots WHERE id LIKE ?", (f"{shoot_id}%",)).fetchone()
-        conn.close()
-        if row:
-            from uuid import UUID
-            shoot = await db.get(Shoot, UUID(row[0]))
+        # Short hex — ORM prefix scan. (No sqlite3 side-channel here: a second
+        # connection ignores the request session and DATABASE_URL, so it cannot
+        # see rows this server created — the same defect class as the
+        # identity-lock invisibility bug.)
+        hex_prefix = shoot_id.replace("-", "").lower()
+        result = await db.execute(
+            select(Shoot).where(sa_cast(Shoot.id, SAString).like(f"{hex_prefix[:8]}%"))
+        )
+        shoot = result.scalars().first()
     if not shoot:
         raise HTTPException(404, "Shoot not found")
 
@@ -89,6 +95,14 @@ async def get_shoot_images(shoot_id: str, db: AsyncSession = Depends(get_db)):
         "count": len(images),
         "images": images,
     }
+
+
+@router.get("/personas/{persona_id}/shoots", response_model=list[ShootResponse])
+async def list_persona_shoots(persona_id: UUID, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(Shoot).where(Shoot.persona_id == persona_id).order_by(Shoot.created_at.desc())
+    )
+    return result.scalars().all()
 
 
 @router.post("/personas/{persona_id}/shoots", response_model=ShootResponse, status_code=201)
@@ -209,6 +223,23 @@ async def generate_video(
     if not result.success:
         raise HTTPException(502, f"Video generation failed: {result.error}")
 
+    # Download the generated file from the provider URL. The provider only
+    # returns a temporary OSS link — without this, the video_key points at a
+    # file that never exists locally (the bug behind 14 orphan video rows).
+    import httpx
+    from pathlib import Path as _Path
+
+    video_url = result.data.get("video_url", "")
+    video_key = result.data.get("video_key", "")
+    local_bytes = 0
+    if video_url and video_key:
+        dest = _Path(__file__).resolve().parent.parent.parent / "storage" / video_key
+        async with httpx.AsyncClient(timeout=300) as dl:
+            dl_resp = await dl.get(video_url)
+            dl_resp.raise_for_status()
+            dest.write_bytes(dl_resp.content)
+            local_bytes = len(dl_resp.content)
+
     # Resolve identity_id for this persona
     from app.models import Identity
     identity_result = await db.execute(
@@ -221,7 +252,7 @@ async def generate_video(
         id=uuid4(),
         identity_id=identity.id if identity else None,
         prompt=prompt,
-        video_key=result.data.get("video_key", ""),
+        video_key=video_key,
         duration_seconds=result.data.get("duration", duration),
         width=result.data.get("width", 720),
         height=result.data.get("height", 1280),
@@ -229,7 +260,9 @@ async def generate_video(
         metadata_json={
             "model": result.data.get("model", ""),
             "task_id": result.data.get("task_id", ""),
-            "video_url": result.data.get("video_url", ""),
+            "video_url": video_url,
+            "bytes": local_bytes,
+            "is_mock": False,
         },
     )
     db.add(video)
@@ -290,12 +323,26 @@ async def generate_shoot_video(
     if not result.success:
         raise HTTPException(502, f"Video generation failed: {result.error}")
 
+    # Download the generated file from the provider URL (same orphan-file fix
+    # as the persona video route — the provider link is temporary OSS only).
+    import httpx
+    from pathlib import Path as _Path
+
+    video_url = result.data.get("video_url", "")
+    video_key = result.data.get("video_key", "")
+    if video_url and video_key:
+        dest = _Path(__file__).resolve().parent.parent.parent / "storage" / video_key
+        async with httpx.AsyncClient(timeout=300) as dl:
+            dl_resp = await dl.get(video_url)
+            dl_resp.raise_for_status()
+            dest.write_bytes(dl_resp.content)
+
     # Store video linked to shoot
     video = GeneratedVideo(
         id=uuid4(),
         identity_id=shoot.identity_id if getattr(shoot, 'identity_id', None) else None,
         prompt=prompt,
-        video_key=result.data.get("video_key", ""),
+        video_key=video_key,
         duration_seconds=result.data.get("duration", duration),
         generation_time_ms=result.data.get("generation_time_ms", 0),
         metadata_json={
@@ -303,8 +350,9 @@ async def generate_shoot_video(
             "shot_index": shot_index,
             "model": result.data.get("model", ""),
             "task_id": result.data.get("task_id", ""),
-            "video_url": result.data.get("video_url", ""),
+            "video_url": video_url,
             "source_image": image_path,
+            "is_mock": False,
         },
     )
     db.add(video)
@@ -406,15 +454,16 @@ async def generate_adult_content(
     
     # Generate using identity engine
     from app.identity_engine import generate_identity_locked
-    from pathlib import Path as _Path
-    
-    content_dir = _Path(__file__).parent.parent / "storage" / "adult_content" / persona_id.hex[:8]
+
+    # parent.parent.parent — must match main.py's ADULT_DIR (apps/api/storage)
+    content_dir = Path(__file__).parent.parent.parent / "storage" / "adult_content" / persona_id.hex[:8]
     content_dir.mkdir(parents=True, exist_ok=True)
     
     filename = f"{body.content_type}_{int(time.time())}.png"
     output_path = str(content_dir / filename)
     
-    result = generate_identity_locked(
+    # Run in-process — generate_identity_locked is async and registry-driven
+    result = await generate_identity_locked(
         persona_id_hex=persona_id.hex,
         scene_prompt=full_prompt,
         output_path=output_path,
@@ -484,11 +533,30 @@ async def auto_produce(
     persona = await db.get(Persona, persona_id)
     if not persona:
         raise HTTPException(404, "Persona not found")
-    if not persona.adult_verified:
-        raise HTTPException(403, "Persona must be adult-verified for automated production")
+
+    ok, reason = persona_ready_for_production(persona)
+    if not ok:
+        raise HTTPException(409, reason)
+
+    lock = await ensure_identity_lock(persona, db)
+    if lock.status != IdentityLockStatus.ACTIVE:
+        raise HTTPException(
+            409,
+            "Finish and approve this persona's identity before producing content.",
+        )
+
+    # One auto-produce run at a time per persona — rapid clicks must not stack jobs
+    running = await db.scalar(
+        select(func.count(Job.id)).where(
+            Job.persona_id == persona_id,
+            Job.type == "auto_produce",
+            Job.status.in_(["queued", "running"]),
+        )
+    )
+    if running:
+        raise HTTPException(409, "Production already running for this persona")
     
     # Create job for progress tracking
-    from app.models import Job
     job = Job(
         id=uuid4(),
         type="auto_produce",
@@ -532,26 +600,28 @@ async def _run_auto_produce(
     themes: str = "",
 ):
     """Background task for automated production."""
-    from app.database import AsyncSessionLocal
-    from app.identity_engine import generate_identity_locked, get_identity_lock
-    from app.providers.registry import get_registry
-    from app.models import Job
-    from pathlib import Path as _Path
-    import asyncio
+    from app.identity_engine import generate_identity_locked
+    from app.workflows.engine import workflow_engine
+
+    # Same session factory the workflow engine uses — one owner for
+    # background sessions (tests override it).
+    session_factory = workflow_engine._session_factory
     
-    async with AsyncSessionLocal() as db:
+    async with session_factory() as db:
         persona = await db.get(Persona, persona_id)
         if not persona:
             return
         name = persona.name
     
     # Get identity lock and resolve identity_id
-    lock = get_identity_lock(persona_id.hex)
-    identity_desc = lock["identity_prompt"] if lock else name
+    async with session_factory() as db:
+        persona_for_lock = await db.get(Persona, persona_id)
+        lock = await ensure_identity_lock(persona_for_lock, db)
+    identity_desc = lock.identity_prompt
     
     # Resolve the approved identity for this persona
     resolved_identity_id = None
-    async with AsyncSessionLocal() as db:
+    async with session_factory() as db:
         ident_q = await db.execute(
             select(Identity).where(Identity.persona_id == persona_id).order_by(Identity.created_at.desc())
         )
@@ -617,11 +687,13 @@ async def _run_auto_produce(
     
     completed = 0
     all_results = []
+    gen_provider = ""
+    gen_is_mock = False
     
     registry = get_registry()
     video_provider = registry.get_video_provider()
     
-    async with AsyncSessionLocal() as db:
+    async with session_factory() as db:
         job = await db.get(Job, job_id)
         if job:
             job.status = "running"
@@ -630,7 +702,7 @@ async def _run_auto_produce(
     
     for theme_data in shoot_themes:
         # Create shoot record
-        async with AsyncSessionLocal() as db:
+        async with session_factory() as db:
             shoot = Shoot(
                 id=uuid4(),
                 persona_id=persona_id,
@@ -646,27 +718,36 @@ async def _run_auto_produce(
             shoot_id = shoot.id
         
         shoot_images = []
+        gen_errors: list[str] = []
         
         # Generate images for this shoot
         for i, scene in enumerate(theme_data["scenes"][:images_per_shoot]):
             full_prompt = f"{identity_desc}. {scene}"
-            output_dir = _Path(__file__).parent.parent.parent / "storage" / "shoots" / shoot_id.hex[:8]
+            output_dir = Path(__file__).parent.parent.parent / "storage" / "shoots" / shoot_id.hex[:8]
             output_dir.mkdir(parents=True, exist_ok=True)
             output_path = str(output_dir / f"shot_{i+1:02d}.png")
             
-            # Use sync wrapper for generate_identity_locked
+            # Run in-process — generate_identity_locked is async and registry-driven
             try:
-                result = generate_identity_locked(
+                result = await generate_identity_locked(
                     persona_id_hex=persona_id.hex,
                     scene_prompt=full_prompt,
                     output_path=output_path,
-                    seed_override=hash(f"{shoot_id.hex}_{i}") % 2147483647,
+                    # hash() is salted per process — the seed would change on
+                    # every API restart. Use a stable digest instead.
+                    seed_override=int(hashlib.md5(f"{shoot_id.hex}_{i}".encode()).hexdigest()[:8], 16) % 2147483647,
                 )
                 if result["success"]:
-                    # Content moderation check
-                    from app.providers.moderation import get_moderator
-                    moderator = get_moderator()
-                    mod_result = await moderator.classify_image(output_path)
+                    gen_provider = result.get("provider", "unknown")
+                    gen_is_mock = result.get("is_mock", False)
+                    # Content moderation check — real images only; mock
+                    # placeholder squares are labelled as skipped.
+                    if gen_is_mock:
+                        mod_result = {"safe": True, "nsfw_score": 0.0, "label": "skipped_mock"}
+                    else:
+                        from app.providers.moderation import get_moderator
+                        moderator = get_moderator()
+                        mod_result = await moderator.classify_image(output_path)
                     if not mod_result["safe"]:
                         logger.warning(
                             "moderation_flagged",
@@ -676,30 +757,42 @@ async def _run_auto_produce(
                     # Store as relative path for the image serving endpoint
                     rel = f"storage/shoots/{shoot_id.hex[:8]}/shot_{i+1:02d}.png"
                     shoot_images.append(rel)
+                else:
+                    gen_errors.append(result.get("error", "unknown generation failure"))
             except Exception as e:
+                gen_errors.append(str(e))
                 logger.error(f"Image generation failed: {e}")
             
             completed += 1
-            async with AsyncSessionLocal() as db:
+            async with session_factory() as db:
                 job = await db.get(Job, job_id)
                 if job:
                     job.progress = int(completed / total_steps * 100)
                     job.message = f"{theme_data['name']}: generated {i+1}/{images_per_shoot} images"
                     await db.commit()
             # Also update the shoot's generated_images list in real-time
-            async with AsyncSessionLocal() as db:
+            async with session_factory() as db:
                 shoot = await db.get(Shoot, shoot_id)
                 if shoot:
                     shoot.generated_images = shoot_images
                     await db.commit()
         
         # Update shoot with images
-        async with AsyncSessionLocal() as db:
+        async with session_factory() as db:
             shoot = await db.get(Shoot, shoot_id)
             if shoot:
                 shoot.generated_images = shoot_images
-                shoot.progress = 100 if not generate_videos else 80
-                shoot.status = ShootStatus.COMPLETED if not generate_videos else ShootStatus.GENERATING
+                if not shoot_images:
+                    # Nothing generated — the shoot must not pretend to be done.
+                    shoot.status = ShootStatus.FAILED
+                    shoot.progress = 0.0
+                    shoot.metadata_json = {
+                        **(shoot.metadata_json or {}),
+                        "error": gen_errors[0] if gen_errors else "No images generated",
+                    }
+                else:
+                    shoot.progress = 100 if not generate_videos else 80
+                    shoot.status = ShootStatus.COMPLETED if not generate_videos else ShootStatus.GENERATING
                 await db.commit()
         
         # Generate video for this shoot if enabled
@@ -713,7 +806,7 @@ async def _run_auto_produce(
                     height=1280,
                 )
                 if video_result.success:
-                    async with AsyncSessionLocal() as db:
+                    async with session_factory() as db:
                         # Resolve identity for this persona
                         ident_q = await db.execute(
                             select(Identity).where(Identity.persona_id == persona_id).order_by(Identity.created_at.desc())
@@ -735,7 +828,7 @@ async def _run_auto_produce(
                         db.add(video)
                         await db.commit()
                 
-                async with AsyncSessionLocal() as db:
+                async with session_factory() as db:
                     shoot = await db.get(Shoot, shoot_id)
                     if shoot:
                         shoot.status = ShootStatus.COMPLETED
@@ -743,28 +836,60 @@ async def _run_auto_produce(
                         await db.commit()
             except Exception as e:
                 logger.error(f"Video generation failed: {e}")
-                async with AsyncSessionLocal() as db:
+                async with session_factory() as db:
                     shoot = await db.get(Shoot, shoot_id)
                     if shoot:
                         shoot.status = ShootStatus.COMPLETED
-                        shoot.progress = 100
+                        shoot.progress = 100.0
                         await db.commit()
-        
+
+        # Do not leave a zero-image video shoot stuck indefinitely in GENERATING.
+        # If video generation was requested and no images exist, the shoot has
+        # already been marked FAILED above; ensure it cannot be left GENERATING.
+        async with session_factory() as db:
+            shoot = await db.get(Shoot, shoot_id)
+            if shoot and shoot.status == ShootStatus.GENERATING and not shoot_images:
+                shoot.status = ShootStatus.FAILED
+                shoot.progress = 0.0
+                shoot.metadata_json = {
+                    **(shoot.metadata_json or {}),
+                    "error": "Video requested but no images generated for this shoot",
+                }
+                await db.commit()
+
         completed += 1
         all_results.append({
             "theme": theme_data["name"],
             "images": len(shoot_images),
             "video": generate_videos,
+            "errors": gen_errors[:1],
         })
     
-    # Mark job complete
-    async with AsyncSessionLocal() as db:
+    # Mark job complete — or failed if every shoot came out empty.
+    # Record which provider actually executed so the UI never mistakes a
+    # mock image for real AI-provider output.
+    total_images = sum(r["images"] for r in all_results)
+    async with session_factory() as db:
         job = await db.get(Job, job_id)
         if job:
-            job.status = "completed"
-            job.progress = 100
-            job.message = f"Production complete for {name}"
-            job.metadata_json["results"] = all_results
+            if total_images == 0:
+                job.status = "failed"
+                job.progress = 100
+                first_err = next((r["errors"][0] for r in all_results if r["errors"]), "unknown error")
+                job.message = f"Production failed for {name}: {first_err}"
+            else:
+                job.status = "completed"
+                job.progress = 100
+                provider_note = "mock provider" if gen_is_mock else f"{gen_provider}" if gen_provider else "unknown provider"
+                job.message = (
+                    f"Production complete for {name} — {total_images} images via {provider_note}"
+                )
+            job.metadata_json = {
+                **(job.metadata_json or {}),
+                "results": all_results,
+                "image_provider": gen_provider,
+                "is_mock": gen_is_mock,
+            }
             await db.commit()
 
 

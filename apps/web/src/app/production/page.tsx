@@ -5,6 +5,7 @@ import { getDashboardSummary, listVideos, autoProduce, listJobs, listPersonas } 
 import type { DashboardSummary, ShootDetail, PersonaDetail } from '@/lib/types'
 import { Icons } from '@/lib/icons'
 import { StatusBadge } from '@/components/ui/StatusBadge'
+import { Toast, type ToastState } from '@/components/ui/Toast'
 
 interface VideoItem {
   id: string; prompt: string; video_url: string; video_key: string;
@@ -40,7 +41,9 @@ export default function ProductionPage() {
   const [loading, setLoading] = useState(true)
   const [autoProducing, setAutoProducing] = useState<string | null>(null)
   const [selectedThemes, setSelectedThemes] = useState<string[]>(['lifestyle', 'fashion', 'swimwear'])
-  const [toast, setToast] = useState<{ msg: string; type: 'success' | 'error' } | null>(null)
+  const [toast, setToast] = useState<ToastState>(null)
+  const [statusFilter, setStatusFilter] = useState<'all' | 'completed' | 'failed' | 'draft'>('all')
+  const [lightbox, setLightbox] = useState<string | null>(null)
 
   useEffect(() => {
     Promise.all([
@@ -50,14 +53,13 @@ export default function ProductionPage() {
     ]).then(() => setLoading(false)).catch(() => setLoading(false))
   }, [])
 
-  // Poll for running jobs
+  // Poll for running jobs — always, so jobs started elsewhere still appear
   useEffect(() => {
-    if (jobs.length === 0) return
     const interval = setInterval(() => {
       listJobs({ status: 'running' }).then((data: JobItem[]) => setJobs(data)).catch(() => {})
     }, 3000)
     return () => clearInterval(interval)
-  }, [jobs.length])
+  }, [])
 
   // Load videos for each persona
   useEffect(() => {
@@ -70,7 +72,12 @@ export default function ProductionPage() {
     })
   }, [personas])
 
+  const filteredShoots = statusFilter === 'all'
+    ? shoots
+    : shoots.filter(s => (s.status || '').toLowerCase() === statusFilter)
+
   const handleAutoProduce = async (personaId: string) => {
+    const personaName = personas.find(p => p.id === personaId)?.name || 'persona'
     setAutoProducing(personaId)
     try {
       await autoProduce(personaId, {
@@ -85,14 +92,20 @@ export default function ProductionPage() {
         getDashboardSummary().then((data: DashboardSummary) => setShoots(data.shoots || []))
         listJobs({ status: 'running' }).then((data: JobItem[]) => setJobs(data)).catch(() => {})
       }, 2000)
+      setToast({ msg: `Auto-produce started for ${personaName} — ${selectedThemes.length} themes`, type: 'success' })
+      setTimeout(() => setToast(null), 4000)
     } catch (e) {
-      setToast({ msg: `Auto-produce failed: ${e instanceof Error ? e.message : 'Unknown error'}`, type: 'error' })
+      const msg = e instanceof Error ? e.message : 'Unknown error'
+      setToast({
+        msg: msg.includes('409')
+          ? `${personaName} is already producing — wait for the current run to finish`
+          : `Auto-produce failed: ${msg}`,
+        type: 'error',
+      })
       setTimeout(() => setToast(null), 5000)
+    } finally {
+      setAutoProducing(null)
     }
-    const personaName = personas.find(p => p.id === personaId)?.name || 'persona'
-    setAutoProducing(null)
-    setToast({ msg: `Auto-produce started for ${personaName} — ${selectedThemes.length} themes`, type: 'success' })
-    setTimeout(() => setToast(null), 4000)
   }
 
   return (
@@ -112,10 +125,9 @@ export default function ProductionPage() {
         </section>
 
         {/* Theme Selector */}
-        <section style={{ marginBottom: 24 }}>
+        <section style={{ marginBottom: 20 }}>
           <div className="section-header">
             <h3 className="section-title">Shoot Themes</h3>
-            <span className="muted-sm">Select themes for production</span>
           </div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
             {THEMES.map(t => (
@@ -147,56 +159,59 @@ export default function ProductionPage() {
           </div>
         </section>
 
-        {/* Auto-Produce Cards */}
+        {/* Quick Produce — compact single row */}
         {personas.length > 0 && (
-          <section style={{ marginBottom: 24 }}>
+          <section style={{ marginBottom: 20 }}>
             <div className="section-header">
               <h3 className="section-title">Quick Produce</h3>
+              <span className="muted-sm">{selectedThemes.length} themes × 5 images + video each</span>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 12 }}>
-              {personas.map(p => (
-                <div key={p.id} className="panel" style={{ padding: 16 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-                    <span style={{
-                      width: 36, height: 36, borderRadius: 8, overflow: 'hidden',
-                      background: 'var(--bg-card)', display: 'flex', alignItems: 'center',
-                      justifyContent: 'center', flexShrink: 0,
-                    }}>
-                      {p.avatar_url ? (
-                        <img src={p.avatar_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                      ) : (
-                        <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-muted)' }}>
-                          {p.name.charAt(0)}
-                        </span>
-                      )}
-                    </span>
-                    <div>
-                      <div style={{ fontWeight: 600, fontSize: 14 }}>{p.name}</div>
-                      <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                        {p.status === 'active' ? 'Ready to produce' : 'Building...'}
-                      </div>
-                    </div>
-                  </div>
-                  <button
-                    className="primary-button"
-                    style={{ width: '100%', justifyContent: 'center', opacity: autoProducing === p.id ? 0.6 : 1 }}
-                    disabled={autoProducing === p.id || p.status !== 'active'}
-                    onClick={() => handleAutoProduce(p.id)}
-                  >
-                    {autoProducing === p.id ? (
-                      <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <span className="pulse-dot" style={{ width: 6, height: 6 }} />
-                        Starting pipeline…
+            <div className="panel" style={{ padding: '10px 12px' }}>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                {personas.map(p => {
+                  const busy = jobs.some(j => j.persona_id === p.id)
+                  const producing = autoProducing === p.id
+                  const disabled = producing || p.status !== 'active' || busy
+                  return (
+                    <button
+                      key={p.id}
+                      disabled={disabled}
+                      onClick={() => handleAutoProduce(p.id)}
+                      title={
+                        p.status !== 'active'
+                          ? `Cannot produce — status: ${p.status}`
+                          : busy
+                            ? 'Already producing'
+                            : `Produce ${selectedThemes.length} shoots for ${p.name}`
+                      }
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 8,
+                        padding: '6px 12px 6px 6px', borderRadius: 20,
+                        border: `1px solid ${disabled ? 'var(--border)' : 'var(--green)'}`,
+                        background: producing ? 'rgba(217,251,113,0.15)' : 'transparent',
+                        color: disabled ? 'var(--text-muted)' : 'var(--text)',
+                        fontSize: 13, cursor: disabled ? 'not-allowed' : 'pointer',
+                        opacity: disabled ? 0.55 : 1,
+                      }}
+                    >
+                      <span style={{
+                        width: 26, height: 26, borderRadius: '50%', overflow: 'hidden',
+                        background: 'var(--bg-card)', display: 'flex', alignItems: 'center',
+                        justifyContent: 'center', flexShrink: 0, fontSize: 11, fontWeight: 600,
+                        color: 'var(--text-muted)',
+                      }}>
+                        {p.avatar_url ? (
+                          <img src={p.avatar_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                        ) : (
+                          p.name.charAt(0)
+                        )}
                       </span>
-                    ) : (
-                      <>
-                        {Icons.plus}
-                        Auto-Produce (3 shoots + videos)
-                      </>
-                    )}
-                  </button>
-                </div>
-              ))}
+                      {p.name}
+                      {producing || busy ? <span className="pulse-dot" style={{ width: 5, height: 5 }} /> : Icons.plus}
+                    </button>
+                  )
+                })}
+              </div>
             </div>
           </section>
         )}
@@ -214,7 +229,7 @@ export default function ProductionPage() {
                   <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
                     <span className="pulse-dot" />
                     <span style={{ fontWeight: 600, fontSize: 13 }}>{job.job_type.replace(/_/g, ' ')}</span>
-                    <span className="muted-sm">{job.persona_id.slice(0, 8)}…</span>
+                    <span className="muted-sm">{personas.find(p => p.id === job.persona_id)?.name || `${job.persona_id.slice(0, 8)}…`}</span>
                     <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--green)' }}>{job.progress}%</span>
                   </div>
                   <div className="progress-bar">
@@ -227,84 +242,82 @@ export default function ProductionPage() {
           </section>
         )}
 
-        {/* Shoots */}
+        {/* Shoots — dense grid, filterable */}
         <section style={{ marginBottom: 24 }}>
           <div className="section-header">
-            <h3 className="section-title">Shoots ({shoots.length})</h3>
+            <h3 className="section-title">
+              Shoots
+              <span className="count-badge" style={{ marginLeft: 8 }}>{filteredShoots.length}</span>
+            </h3>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {(['all', 'completed', 'failed', 'draft'] as const).map(f => (
+                <button
+                  key={f}
+                  onClick={() => setStatusFilter(f)}
+                  style={{
+                    padding: '4px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer',
+                    border: `1px solid ${statusFilter === f ? 'var(--green)' : 'var(--border)'}`,
+                    background: statusFilter === f ? 'rgba(217,251,113,0.1)' : 'transparent',
+                    color: statusFilter === f ? 'var(--green)' : 'var(--text-muted)',
+                    textTransform: 'capitalize',
+                  }}
+                >
+                  {f}
+                </button>
+              ))}
+            </div>
           </div>
           {loading ? (
             <p className="muted-md">Loading production data…</p>
-          ) : shoots.length === 0 ? (
+          ) : filteredShoots.length === 0 ? (
             <div style={{ textAlign: 'center', padding: '48px 0', color: 'var(--text-muted)' }}>
-              <p style={{ fontSize: 15, marginBottom: 8 }}>No shoots yet</p>
+              <p style={{ fontSize: 15, marginBottom: 8 }}>No {statusFilter !== 'all' ? statusFilter + ' ' : ''}shoots</p>
               <p style={{ fontSize: 13 }}>Use Auto-Produce above or create a shoot from a persona.</p>
             </div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              {shoots.map(shoot => {
-                const imgs = shoot.generated_images || []
-                const firstImg = imgs.length > 0 ? imgs[0] : null
-                const shootImgUrl = firstImg ? (() => {
-                  const parts = firstImg.split('/')
-                  if (parts.length >= 4) return `/api/v1/shoots/${parts[2]}/images/${parts[3]}`
-                  return null
-                })() : null
-
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 10 }}>
+              {filteredShoots.map(shoot => {
+                const imgs = (shoot.generated_images || []).filter(k => /^storage\/shoots\/[0-9a-f]{8}\//.test(k))
+                const cover = imgs[0]
+                const coverUrl = cover ? `/api/v1/shoots/${cover.split('/')[2]}/images/${cover.split('/')[3]}` : null
                 return (
-                  <article key={shoot.id} className="panel" style={{ padding: '16px 20px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-                      <span style={{
-                        width: 48, height: 48, borderRadius: 8, overflow: 'hidden',
-                        background: 'var(--bg-card)', display: 'flex', alignItems: 'center',
-                        justifyContent: 'center', flexShrink: 0,
-                      }}>
-                        {shootImgUrl ? (
-                          <img src={shootImgUrl} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                        ) : (
-                          <span style={{ color: 'var(--text-muted)' }}>{Icons.image}</span>
-                        )}
-                      </span>
-
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontWeight: 600, fontSize: 14 }}>{shoot.name}</div>
-                        <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                          {shoot.theme || 'No theme'} · {shoot.persona_name}
-                          {imgs.length > 0 && <span style={{ marginLeft: 8 }}>· {imgs.length} image{imgs.length !== 1 ? 's' : ''}</span>}
-                        </div>
-                      </div>
-
-                      <div className="progress-wrap" style={{ minWidth: 120 }}>
-                        <div><i style={{ width: `${Math.round(shoot.progress)}%` }}></i></div>
-                        <span>{Math.round(shoot.progress)}%</span>
-                      </div>
-                      <StatusBadge status={shoot.status} />
+                  <article
+                    key={shoot.id}
+                    className="panel"
+                    style={{ padding: 0, overflow: 'hidden', cursor: coverUrl ? 'pointer' : 'default' }}
+                    onClick={() => coverUrl && setLightbox(coverUrl)}
+                    title={coverUrl ? `${shoot.name} — click to view` : shoot.name}
+                  >
+                    <div style={{
+                      width: '100%', aspectRatio: '3/4', background: 'var(--bg-card)',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      color: 'var(--text-muted)', position: 'relative', overflow: 'hidden',
+                    }}>
+                      {coverUrl ? (
+                        <img src={coverUrl} alt="" loading="lazy" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                      ) : (
+                        <span>{Icons.image}</span>
+                      )}
+                      {imgs.length > 1 && (
+                        <span style={{
+                          position: 'absolute', bottom: 6, right: 6, background: 'rgba(0,0,0,0.7)',
+                          color: '#fff', fontSize: 11, padding: '2px 7px', borderRadius: 10,
+                        }}>{imgs.length}</span>
+                      )}
+                      {shoot.status?.toUpperCase() !== 'COMPLETED' && (
+                        <span style={{
+                          position: 'absolute', top: 6, left: 6, background: 'rgba(0,0,0,0.7)',
+                          color: shoot.status?.toUpperCase() === 'FAILED' ? '#f87171' : '#fbbf24', fontSize: 10,
+                          padding: '2px 7px', borderRadius: 10, textTransform: 'uppercase',
+                        }}>{shoot.status}</span>
+                      )}
                     </div>
-
-                    {imgs.length > 1 && (
-                      <div style={{ display: 'flex', gap: 6, marginTop: 12, paddingLeft: 64, overflowX: 'auto' }}>
-                        {imgs.slice(0, 8).map((img, i) => {
-                          const parts = img.split('/')
-                          const url = parts.length >= 4 ? `/api/v1/shoots/${parts[2]}/images/${parts[3]}` : null
-                          return url ? (
-                            <div key={i} style={{
-                              width: 72, height: 72, borderRadius: 6, overflow: 'hidden',
-                              border: '1px solid var(--border)', flexShrink: 0,
-                            }}>
-                              <img src={url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                            </div>
-                          ) : null
-                        })}
-                        {imgs.length > 8 && (
-                          <div style={{
-                            width: 72, height: 72, borderRadius: 6, flexShrink: 0,
-                            display: 'flex', alignItems: 'center', justifyContent: 'center',
-                            background: 'var(--bg-card)', fontSize: 12, color: 'var(--text-muted)',
-                          }}>
-                            +{imgs.length - 8}
-                          </div>
-                        )}
+                    <div style={{ padding: '8px 10px' }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {shoot.name}
                       </div>
-                    )}
+                      <div className="muted-sm" style={{ fontSize: 11 }}>{shoot.persona_name}</div>
+                    </div>
                   </article>
                 )
               })}
@@ -314,11 +327,11 @@ export default function ProductionPage() {
 
         {/* Videos */}
         {videos.length > 0 && (
-          <section>
+          <section style={{ marginBottom: 24 }}>
             <div className="section-header">
-              <h3 className="section-title">Generated Videos ({videos.length})</h3>
+              <h3 className="section-title">Videos ({videos.length})</h3>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 10 }}>
               {videos.map(v => (
                 <article key={v.id} className="panel" style={{ padding: 0, overflow: 'hidden' }}>
                   {v.video_url ? (
@@ -326,6 +339,7 @@ export default function ProductionPage() {
                       src={v.video_url}
                       controls
                       muted
+                      preload="metadata"
                       style={{ width: '100%', aspectRatio: '9/16', objectFit: 'cover', background: '#000' }}
                     />
                   ) : (
@@ -337,14 +351,6 @@ export default function ProductionPage() {
                       <span>{Icons.activity}</span>
                     </div>
                   )}
-                  <div style={{ padding: '10px 14px' }}>
-                    <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 4 }}>
-                      {v.duration}s · {v.width}×{v.height}
-                    </div>
-                    <div className="muted-sm" style={{ lineHeight: 1.4 }}>
-                      {v.prompt.length > 80 ? v.prompt.slice(0, 80) + '…' : v.prompt}
-                    </div>
-                  </div>
                 </article>
               ))}
             </div>
@@ -352,19 +358,13 @@ export default function ProductionPage() {
         )}
       </div>
 
-      {/* Toast notification */}
-      {toast && (
-        <div style={{
-          position: 'fixed', bottom: 24, right: 24, zIndex: 999,
-          padding: '12px 20px', borderRadius: 8, fontSize: 13, fontWeight: 500,
-          background: toast.type === 'success' ? 'var(--green)' : '#ef4444',
-          color: toast.type === 'success' ? '#0c0e12' : '#fff',
-          boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
-          animation: 'slideUp 0.3s ease',
-        }}>
-          {toast.type === 'success' ? '✓' : '✗'} {toast.msg}
+      {lightbox && (
+        <div className="gallery-lightbox" onClick={() => setLightbox(null)}>
+          <img src={lightbox} alt="Full size" style={{ maxWidth: '90vw', maxHeight: '85vh', borderRadius: 8 }} />
         </div>
       )}
+
+      <Toast toast={toast} onDismiss={() => setToast(null)} />
     </main>
   )
 }

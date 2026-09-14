@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import {
-  getPersona, listIdentities, listShoots, listPacks, listWorkflows,
+  getPersona, listIdentities, listShoots, getShootImages, listPacks, listWorkflows,
   getAnalytics, getForecasts, getSchedule, getGallery,
   createShoot, createPack,
   generateAnalytics, generateForecast, generateSchedule,
@@ -12,6 +12,7 @@ import {
 import { GRADIENTS } from '@/lib/constants'
 import { Icons } from '@/lib/icons'
 import { StatusBadge } from '@/components/ui/StatusBadge'
+import { Toast, type ToastState } from '@/components/ui/Toast'
 
 type Tab = 'overview' | 'identity' | 'shoots' | 'content' | 'analytics' | 'revenue' | 'schedule' | 'workflows' | 'gallery'
 
@@ -31,23 +32,46 @@ const TABS: { key: Tab; label: string }[] = [
 function useTabData<T>(id: string, fetcher: () => Promise<T>, deps: unknown[]) {
   const [data, setData] = useState<T | null>(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [attempt, setAttempt] = useState(0)
   useEffect(() => {
     let cancelled = false
+    setLoading(true); setError(null)
     fetcher().then(d => { if (!cancelled) { setData(d); setLoading(false) } })
-      .catch(() => { if (!cancelled) setLoading(false) })
+      .catch((e) => { if (!cancelled) { setError(e instanceof Error ? e.message : 'Something went wrong'); setLoading(false) } })
     return () => { cancelled = true }
-  }, deps) // eslint-disable-line react-hooks/exhaustive-deps
-  return { data, loading, setData }
+  }, [...deps, attempt]) // eslint-disable-line react-hooks/exhaustive-deps
+  return { data, loading, error, retry: () => setAttempt(a => a + 1), setData }
+}
+
+function ErrorState({ error, retry }: { error: string; retry: () => void }) {
+  return (
+    <div style={{ padding: '24px 0', textAlign: 'center' }}>
+      <p style={{ fontSize: 14, fontWeight: 500, color: '#ef4444', marginBottom: 6 }}>Couldn&apos;t load this tab</p>
+      <p className="muted-md" style={{ marginBottom: 14 }}>{error}</p>
+      <button onClick={retry} className="secondary-button btn-sm">Try again</button>
+    </div>
+  )
 }
 
 /* ── Tab panels ───────────────────────────────────────── */
 
-function OverviewTab({ persona }: { persona: any }) {
+function OverviewTab({ id, persona }: { id: string; persona: any }) {
+  // Identity state lives on the approved Identity row (the persona build creates
+  // it) — the persona row's own identity_* columns are never populated.
+  const { data: identities } = useTabData(id, () => listIdentities(id), [id])
+  const approved = (identities || []).find((i: any) => i.status === 'ready')
+  const score = approved?.consistency_score
   const items = [
     { label: 'Status', value: persona.status },
-    { label: 'Identity', value: persona.identity_score ? `${(persona.identity_score * 100).toFixed(1)}%` : 'N/A' },
+    {
+      label: 'Identity',
+      value: approved
+        ? `${approved.name}${typeof score === 'number' && score > 0 ? ` · ${(score * 100).toFixed(1)}%` : ''}`
+        : 'Pending build',
+    },
     { label: 'Content Packs', value: persona.packs_count },
-    { label: 'Voice', value: persona.identity_status === 'ready' ? 'READY' : 'PENDING' },
+    { label: 'Voice', value: approved ? 'READY' : 'PENDING' },
   ]
   return (
     <div className="grid-4">
@@ -62,11 +86,12 @@ function OverviewTab({ persona }: { persona: any }) {
 }
 
 function GalleryTab({ id }: { id: string }) {
-  const { data: gallery, loading } = useTabData(id, () => getGallery(id), [id])
+  const { data: gallery, loading, error, retry } = useTabData(id, () => getGallery(id), [id])
   const [selected, setSelected] = useState<string | null>(null)
 
   if (loading) return <p className="muted-md">Loading gallery…</p>
-  if (!gallery?.images?.length) return <p className="muted-md">No images yet.</p>
+  if (error) return <ErrorState error={error} retry={retry} />
+  if (!gallery?.images?.length) return <p className="muted-md">No images yet — produce a shoot to fill the gallery.</p>
 
   return (
     <div>
@@ -93,8 +118,9 @@ function GalleryTab({ id }: { id: string }) {
 }
 
 function IdentityTab({ id }: { id: string }) {
-  const { data: identities, loading } = useTabData(id, () => listIdentities(id), [id])
+  const { data: identities, loading, error, retry } = useTabData(id, () => listIdentities(id), [id])
   if (loading) return <p className="muted-md">Loading…</p>
+  if (error) return <ErrorState error={error} retry={retry} />
   return (
     <div>
       <h3 className="section-title">Identities ({identities?.length || 0})</h3>
@@ -104,24 +130,41 @@ function IdentityTab({ id }: { id: string }) {
           <StatusBadge status={i.status} />
         </div>
       ))}
-      {identities?.length === 0 && <p className="muted-md">No identities yet.</p>}
+      {identities?.length === 0 && <p className="muted-md">No identities yet — the build pipeline creates them.</p>}
     </div>
   )
 }
 
 function ShootsTab({ id }: { id: string }) {
-  const { data: shoots, loading, setData } = useTabData(id, () => listShoots(id), [id])
+  const { data: shoots, loading, error, retry, setData } = useTabData(id, () => listShoots(id), [id])
   const [busy, setBusy] = useState(false)
+  const [toast, setToast] = useState<ToastState>(null)
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const [lightbox, setLightbox] = useState<{ shoot: string; url: string } | null>(null)
+
+  const toggleShoot = (shootId: string) => {
+    setExpanded(prev => {
+      const next = new Set(prev)
+      if (next.has(shootId)) next.delete(shootId)
+      else next.add(shootId)
+      return next
+    })
+  }
   const handleCreate = async () => {
     setBusy(true)
     try {
       const shoot = await createShoot(id, { name: 'New Shoot', theme: 'lifestyle', image_count: 8 })
       setData((prev: any) => prev ? [shoot, ...prev] : [shoot])
+      setToast({ msg: 'Shoot created — use Auto-Produce on the Production page to fill it', type: 'success' })
+    } catch (e) {
+      setToast({ msg: `Couldn't create shoot: ${e instanceof Error ? e.message : 'unknown error'}`, type: 'error' })
     } finally { setBusy(false) }
   }
   if (loading) return <p className="muted-md">Loading…</p>
+  if (error) return <ErrorState error={error} retry={retry} />
   return (
     <div>
+      <Toast toast={toast} onDismiss={() => setToast(null)} />
       <div className="section-header">
         <h3 className="section-title">Shoots ({shoots?.length || 0})</h3>
         <button onClick={handleCreate} disabled={busy} className="primary-button btn-sm">
@@ -129,26 +172,92 @@ function ShootsTab({ id }: { id: string }) {
         </button>
       </div>
       {shoots?.map((s: any) => (
-        <div key={s.id} className="panel list-row">
-          <span className="field-value">{s.name || s.theme}</span>
-          <StatusBadge status={s.status} />
-        </div>
+        <ShootRow key={s.id} shoot={s} expanded={expanded.has(s.id)}
+          onToggle={() => toggleShoot(s.id)} lightbox={lightbox} setLightbox={setLightbox} />
       ))}
+      {shoots?.length === 0 && <p className="muted-md">No shoots yet — create one, then run Auto-Produce.</p>}
+      {lightbox && (
+        <div className="gallery-lightbox" onClick={() => setLightbox(null)}>
+          <img src={lightbox.url} alt="Full size" style={{ maxWidth: '90vw', maxHeight: '85vh', borderRadius: 8 }} />
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ShootRow({ shoot, expanded, onToggle, lightbox, setLightbox }: {
+  shoot: any; expanded: boolean; onToggle: () => void
+  lightbox: { shoot: string; url: string } | null
+  setLightbox: (v: { shoot: string; url: string } | null) => void
+}) {
+  const imgCount = shoot.generated_images?.length || 0
+  const hasImages = imgCount > 0
+  return (
+    <div className="panel" style={{ padding: 0 }}>
+      <button
+        onClick={onToggle}
+        disabled={!hasImages}
+        style={{ all: 'unset', display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', padding: 12, cursor: hasImages ? 'pointer' : 'default' }}
+      >
+        <span className="field-value">
+          {shoot.name || shoot.theme}
+          {hasImages && <span className="muted-sm" style={{ marginLeft: 8 }}>{imgCount} image{imgCount === 1 ? '' : 's'}{expanded ? ' ▴' : ' ▾'}</span>}
+        </span>
+        <StatusBadge status={shoot.status} />
+      </button>
+      {expanded && hasImages && (
+        <ShootImages shootId={shoot.id} lightbox={lightbox} setLightbox={setLightbox} />
+      )}
+    </div>
+  )
+}
+
+function ShootImages({ shootId, lightbox, setLightbox }: {
+  shootId: string
+  lightbox: { shoot: string; url: string } | null
+  setLightbox: (v: { shoot: string; url: string } | null) => void
+}) {
+  const { data, loading, error, retry } = useTabData(
+    shootId, () => getShootImages(shootId), [shootId],
+  )
+  if (loading) return <p className="muted-md" style={{ padding: '0 12px 12px' }}>Loading images…</p>
+  if (error) return (
+    <div style={{ padding: '0 12px 12px' }}>
+      <p className="muted-md">Couldn&apos;t load images.</p>
+      <button onClick={retry} className="secondary-button btn-sm">Try again</button>
+    </div>
+  )
+  if (!data?.images?.length) return <p className="muted-md" style={{ padding: '0 12px 12px' }}>No images stored for this shoot.</p>
+  return (
+    <div style={{ padding: '4px 12px 12px' }}>
+      <div className="gallery-grid">
+        {data.images.map((img: any, i: number) => (
+          <button key={i} className="gallery-thumb" onClick={() => setLightbox({ shoot: shootId, url: img.url })}>
+            <img src={img.url} alt={img.filename} />
+            <span className="gallery-label">{img.filename}</span>
+          </button>
+        ))}
+      </div>
     </div>
   )
 }
 
 function ContentTab({ id, personaName }: { id: string; personaName: string }) {
-  const { data: packs, loading, setData } = useTabData(id, () => listPacks(id), [id])
+  const { data: packs, loading, error, retry, setData } = useTabData(id, () => listPacks(id), [id])
   const [busy, setBusy] = useState(false)
+  const [toast, setToast] = useState<ToastState>(null)
   const handleCreate = async () => {
     setBusy(true)
     try {
       const pack = await createPack(id, { name: `${personaName} Pack`, platform: 'instagram' })
       setData((prev: any) => prev ? [pack, ...prev] : [pack])
+      setToast({ msg: `Generating pack “${personaName} Pack” — check Content when it's ready`, type: 'success' })
+    } catch (e) {
+      setToast({ msg: `Couldn't create pack: ${e instanceof Error ? e.message : 'unknown error'}`, type: 'error' })
     } finally { setBusy(false) }
   }
   if (loading) return <p className="muted-md">Loading…</p>
+  if (error) return <ErrorState error={error} retry={retry} />
   return (
     <div>
       <div className="section-header">
@@ -166,19 +275,23 @@ function ContentTab({ id, personaName }: { id: string; personaName: string }) {
           <StatusBadge status={p.status} />
         </div>
       ))}
+      {packs?.length === 0 && <p className="muted-md">No packs yet — generate one to bundle content for posting.</p>}
     </div>
   )
 }
 
 function AnalyticsTab({ id }: { id: string }) {
-  const { data: analytics, loading, setData } = useTabData(id, () => getAnalytics(id), [id])
+  const { data: analytics, loading, error, retry, setData } = useTabData(id, () => getAnalytics(id), [id])
   const [busy, setBusy] = useState(false)
+  const [toast, setToast] = useState<ToastState>(null)
   const handleGenerate = async () => {
     setBusy(true)
-    try { await generateAnalytics(id); const a = await getAnalytics(id); setData(a) }
+    try { await generateAnalytics(id); const a = await getAnalytics(id); setData(a); setToast({ msg: 'Analytics generated', type: 'success' }) }
+    catch (e) { setToast({ msg: `Couldn't generate analytics: ${e instanceof Error ? e.message : 'unknown error'}`, type: 'error' }) }
     finally { setBusy(false) }
   }
   if (loading) return <p className="muted-md">Loading…</p>
+  if (error) return <ErrorState error={error} retry={retry} />
   return (
     <div>
       <div className="section-header">
@@ -202,19 +315,23 @@ function AnalyticsTab({ id }: { id: string }) {
           ))}
         </div>
       )}
+      {analytics?.length === 0 && <p className="muted-md">No analytics yet — generate to pull the latest numbers.</p>}
     </div>
   )
 }
 
 function RevenueTab({ id }: { id: string }) {
-  const { data: forecasts, loading, setData } = useTabData(id, () => getForecasts(id), [id])
+  const { data: forecasts, loading, error, retry, setData } = useTabData(id, () => getForecasts(id), [id])
   const [busy, setBusy] = useState(false)
+  const [toast, setToast] = useState<ToastState>(null)
   const handleGenerate = async () => {
     setBusy(true)
-    try { await generateForecast(id); const f = await getForecasts(id); setData(f) }
+    try { await generateForecast(id); const f = await getForecasts(id); setData(f); setToast({ msg: 'Forecast generated', type: 'success' }) }
+    catch (e) { setToast({ msg: `Couldn't generate forecast: ${e instanceof Error ? e.message : 'unknown error'}`, type: 'error' }) }
     finally { setBusy(false) }
   }
   if (loading) return <p className="muted-md">Loading…</p>
+  if (error) return <ErrorState error={error} retry={retry} />
   return (
     <div>
       <div className="section-header">
@@ -236,20 +353,23 @@ function RevenueTab({ id }: { id: string }) {
           </div>
         </div>
       ))}
-      {forecasts?.length === 0 && <p className="muted-md">Generate a forecast to see projections.</p>}
+      {forecasts?.length === 0 && <p className="muted-md">No forecast yet — generate to see revenue projections.</p>}
     </div>
   )
 }
 
 function ScheduleTab({ id }: { id: string }) {
-  const { data: schedule, loading, setData } = useTabData(id, () => getSchedule(id), [id])
+  const { data: schedule, loading, error, retry, setData } = useTabData(id, () => getSchedule(id), [id])
   const [busy, setBusy] = useState(false)
+  const [toast, setToast] = useState<ToastState>(null)
   const handleGenerate = async () => {
     setBusy(true)
-    try { await generateSchedule(id); const sc = await getSchedule(id); setData(sc) }
+    try { await generateSchedule(id); const sc = await getSchedule(id); setData(sc); setToast({ msg: 'Posting schedule created', type: 'success' }) }
+    catch (e) { setToast({ msg: `Couldn't auto-schedule: ${e instanceof Error ? e.message : 'unknown error'}`, type: 'error' }) }
     finally { setBusy(false) }
   }
   if (loading) return <p className="muted-md">Loading…</p>
+  if (error) return <ErrorState error={error} retry={retry} />
   return (
     <div>
       <div className="section-header">
@@ -265,13 +385,15 @@ function ScheduleTab({ id }: { id: string }) {
           <StatusBadge status={s.status} />
         </div>
       ))}
+      {schedule?.length === 0 && <p className="muted-md">Nothing scheduled yet — Auto-Schedule fills the calendar from your packs.</p>}
     </div>
   )
 }
 
 function WorkflowsTab({ id }: { id: string }) {
-  const { data: workflows, loading } = useTabData(id, () => listWorkflows({ persona_id: id }), [id])
+  const { data: workflows, loading, error, retry } = useTabData(id, () => listWorkflows({ persona_id: id }), [id])
   if (loading) return <p className="muted-md">Loading…</p>
+  if (error) return <ErrorState error={error} retry={retry} />
   return (
     <div>
       <h3 className="section-title">Workflows ({workflows?.length || 0})</h3>
@@ -284,7 +406,7 @@ function WorkflowsTab({ id }: { id: string }) {
           <StatusBadge status={w.status} />
         </div>
       ))}
-      {workflows?.length === 0 && <p className="muted-md">No workflows yet.</p>}
+      {workflows?.length === 0 && <p className="muted-md">No workflows yet — they appear when builds run.</p>}
     </div>
   )
 }
@@ -296,18 +418,52 @@ export default function PersonaPage() {
   const [tab, setTab] = useState<Tab>('overview')
   const [persona, setPersona] = useState<any>(null)
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [toast, setToast] = useState<ToastState>(null)
 
   useEffect(() => {
     if (!id) return
     getPersona(id).then(p => { setPersona(p); setLoading(false) })
-      .catch(() => setLoading(false))
+      .catch((e) => { setLoadError(e instanceof Error ? e.message : 'Something went wrong'); setLoading(false) })
   }, [id])
 
+  const autopilotOn = persona?.metadata_json?.autopilot === 'on'
+  const handleToggleAutopilot = async () => {
+    const next = autopilotOn ? 'off' : 'on'
+    try {
+      await toggleAutopilot(id, next)
+      setPersona((p: any) => ({ ...p, metadata_json: { ...(p.metadata_json || {}), autopilot: next } }))
+      setToast({
+        msg: next === 'on' ? 'Autopilot on — this model now produces and posts on its own' : 'Autopilot off — you drive production manually',
+        type: 'success',
+      })
+    } catch (e) {
+      setToast({ msg: `Couldn't change autopilot: ${e instanceof Error ? e.message : 'unknown error'}`, type: 'error' })
+    }
+  }
+
   if (loading) return <main className="workspace"><div className="content muted-md">Loading…</div></main>
-  if (!persona) return <main className="workspace"><div className="content muted-md">Persona not found</div></main>
+  if (!persona) {
+    const notFound = loadError?.includes('404')
+    return (
+      <main className="workspace">
+        <div className="content">
+          <div style={{ padding: '48px 0', textAlign: 'center' }}>
+            <p style={{ fontSize: 15, fontWeight: 500, marginBottom: 8 }}>
+              {notFound ? 'This model doesn&apos;t exist' : 'Couldn&apos;t load this model'}
+            </p>
+            <p className="muted-md" style={{ marginBottom: 20 }}>
+              {notFound ? 'It may have been deleted, or the link is stale.' : loadError}
+            </p>
+            <a href="/" className="secondary-button" style={{ textDecoration: 'none' }}>Back to Overview</a>
+          </div>
+        </div>
+      </main>
+    )
+  }
 
   const tabContent = {
-    overview: <OverviewTab persona={persona} />,
+    overview: <OverviewTab id={id} persona={persona} />,
     gallery: <GalleryTab id={id} />,
     identity: <IdentityTab id={id} />,
     shoots: <ShootsTab id={id} />,
@@ -340,7 +496,13 @@ export default function PersonaPage() {
             <p className="persona-meta">Age {persona.age} · {persona.brand} · {persona.status}</p>
           </div>
           <div className="persona-actions">
-            <button onClick={() => toggleAutopilot(id, 'on')} className="secondary-button">Autopilot ON</button>
+            <button
+              onClick={handleToggleAutopilot}
+              className="secondary-button"
+              style={autopilotOn ? { borderColor: 'var(--green)', color: 'var(--green)' } : undefined}
+            >
+              Autopilot: {autopilotOn ? 'ON' : 'OFF'}
+            </button>
           </div>
         </div>
 
@@ -356,6 +518,7 @@ export default function PersonaPage() {
           {tabContent[tab]}
         </div>
       </div>
+      <Toast toast={toast} onDismiss={() => setToast(null)} />
     </main>
   )
 }

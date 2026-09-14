@@ -1,6 +1,11 @@
-"""Persona Studio — Test configuration and fixtures."""
-
+"""
+Persona Studio — test configuration and fixtures.
+"""
 import asyncio
+import os
+import tempfile
+from pathlib import Path
+
 import pytest
 import pytest_asyncio
 from uuid import uuid4
@@ -11,16 +16,22 @@ from fastapi import Depends
 from app.main import app
 from app.database import Base, get_db
 
-from sqlalchemy.pool import StaticPool
+# Use a real SQLite file for testing — no external DB required.
+# A file (not :memory:) matters because background tasks (persona build,
+# auto-produce) open their own sessions on separate connections; an in-memory
+# singleton pool makes those connections invisible to each other.
+_test_db_file = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+_test_db_file.close()
+TEST_DB_PATH = _test_db_file.name
+TEST_DATABASE_URL = f"sqlite+aiosqlite:///{TEST_DB_PATH}"
 
-# Use SQLite for testing — no external DB required
-TEST_DATABASE_URL = "sqlite+aiosqlite:///./test.db"
+# Point the sync identity engine at the same file before any app code runs.
+os.environ["PERSONA_STUDIO_DB"] = TEST_DB_PATH
 
 test_engine = create_async_engine(
     TEST_DATABASE_URL,
     echo=False,
     connect_args={"check_same_thread": False},
-    poolclass=StaticPool,  # Single connection for SQLite concurrency
 )
 TestSessionLocal = async_sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)
 
@@ -43,6 +54,16 @@ async def setup_db():
     await test_engine.dispose()
 
 
+# Force mock providers for tests (avoid real LLM/image/voice calls)
+os.environ["PROVIDER_REGISTRY"] = "mock"
+from app.providers.registry import reset_registry, get_registry
+from app.config import get_settings
+get_settings.cache_clear()
+reset_registry()
+_registry = get_registry()
+assert _registry._mode == "mock", f"Expected mock, got {_registry._mode}"
+
+
 async def override_get_db():
     async with TestSessionLocal() as session:
         try:
@@ -52,22 +73,13 @@ async def override_get_db():
             await session.rollback()
             raise
 
+
 # Override the database dependency for all tests
 app.dependency_overrides[get_db] = override_get_db
 
 # Override the workflow engine's session factory
 from app.workflows.engine import workflow_engine
 workflow_engine._session_factory = TestSessionLocal
-
-# Force mock providers for tests (avoid real LLM/image/voice calls)
-import os
-os.environ["PROVIDER_REGISTRY"] = "mock"
-from app.providers.registry import reset_registry, get_registry
-from app.config import get_settings
-get_settings.cache_clear()
-reset_registry()
-_registry = get_registry()
-assert _registry._mode == "mock", f"Expected mock, got {_registry._mode}"
 
 
 @pytest_asyncio.fixture

@@ -143,10 +143,20 @@ class HuggingFaceTrainer(TrainerProvider):
         )
 
         if not image_files:
-            # Generate synthetic training images if none exist
-            logger.info("no_reference_images", generating="synthetic")
+            # Truthful fallback: label the run so downstream steps and the UI
+            # can never mistake synthetic training data for the identity's
+            # real reference set.
+            trained_on = "synthetic_fallback"
+            logger.warning(
+                "no_reference_images",
+                dataset_id=dataset_id,
+                dataset_path=str(dataset_path),
+                action="training_on_synthetic_fallback",
+            )
             dataset_path.mkdir(parents=True, exist_ok=True)
             image_files = self._generate_synthetic_images(dataset_path, count=8)
+        else:
+            trained_on = "reference_images"
 
         logger.info("loaded_dataset", images=len(image_files), path=str(dataset_path))
 
@@ -299,6 +309,8 @@ class HuggingFaceTrainer(TrainerProvider):
             "total_steps": steps,
             "device": self._device,
             "base_model": self._base_model,
+            "training_images": len(image_files),
+            "trained_on": trained_on,
         }
 
     def _generate_synthetic_images(self, output_dir: Path, count: int = 8) -> list[Path]:

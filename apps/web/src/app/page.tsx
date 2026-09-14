@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { getDashboardSummary } from '@/lib/api'
 import type { DashboardSummary } from '@/lib/types'
 import { GRADIENTS } from '@/lib/constants'
@@ -35,6 +36,19 @@ export default function Dashboard() {
   const [summary, setSummary] = useState<DashboardSummary | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const router = useRouter()
+
+  // ⌘K / Ctrl+K jumps to the models list — the search button's real behavior.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        router.push('/models')
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [router])
 
   useEffect(() => {
     getDashboardSummary()
@@ -99,7 +113,7 @@ export default function Dashboard() {
         <button className="mobile-menu" aria-label="Open menu">{Icons.menu}</button>
         <div className="crumb"><span>Persona Studio</span><b>/</b><strong>Overview</strong></div>
         <div className="top-actions">
-          <button className="search-button">{Icons.search}<span>Search or jump to…</span><kbd>⌘ K</kbd></button>
+          <button className="search-button" onClick={() => router.push('/models')}>{Icons.search}<span>Search or jump to…</span><kbd>⌘ K</kbd></button>
           <a href="/models/create"><button className="primary-button">{Icons.plus} Create model</button></a>
         </div>
       </header>
@@ -116,49 +130,58 @@ export default function Dashboard() {
           <a href="/production"><button className="secondary-button">{Icons.activity} Open live production</button></a>
         </section>
 
-        {/* Metrics */}
+        {/* Metrics — each card navigates to its section */}
         <section className="metrics-grid">
-          <article className="metric-card">
-            <div className="metric-top"><span>Active models</span><span className="metric-icon">{Icons.users}</span></div>
-            <strong>{data.active_models}</strong>
-            <div className="metric-foot">
-              <span className="positive">{data.training_models > 0 ? `${data.training_models} training` : 'All active'}</span>
-              <small>{data.total_models} total identities</small>
-            </div>
-          </article>
-          <article className="metric-card">
-            <div className="metric-top"><span>Packs in production</span><span className="metric-icon">{Icons.package}</span></div>
-            <strong>{data.total_packs}</strong>
-            <div className="metric-foot">
-              <span className={attentionCount > 0 ? 'warning' : 'positive'}>
-                {attentionCount > 0 ? `${attentionCount} need attention` : 'No pending items'}
-              </span>
-              <small>{data.total_shoots} total shoots</small>
-            </div>
-          </article>
-          <article className="metric-card">
-            <div className="metric-top"><span>Revenue this month</span><span className="metric-icon">{Icons.dollar}</span></div>
-            <strong>{formatCurrency(data.revenue)}</strong>
-            <div className="metric-foot">
-              <span className="positive">{data.active_models > 0 ? 'From analytics' : 'No data yet'}</span>
-              <small>Across all personas</small>
-            </div>
-          </article>
-          <article className="metric-card">
-            <div className="metric-top"><span>System health</span><span className="metric-icon">{Icons.trending}</span></div>
-            <strong>{data.health.online}/{data.health.total}</strong>
-            <div className="metric-foot">
-              <span className={data.health.online === data.health.total ? 'positive' : 'warning'}>
-                {data.health.online === data.health.total ? 'All services online' : `${data.health.total - data.health.online} degraded`}
-              </span>
-              <small>Provider status</small>
-            </div>
-          </article>
+          <a href="/models" className="section-link" style={{ textDecoration: 'none' }}>
+            <article className="metric-card">
+              <div className="metric-top"><span>Active models</span><span className="metric-icon">{Icons.users}</span></div>
+              <strong>{data.active_models}</strong>
+              <div className="metric-foot">
+                <span className="positive">{data.training_models > 0 ? `${data.training_models} training` : 'All active'}</span>
+                <small>{data.total_models} total identities</small>
+              </div>
+            </article>
+          </a>
+          <a href="/production" className="section-link" style={{ textDecoration: 'none' }}>
+            <article className="metric-card">
+              <div className="metric-top"><span>Packs in production</span><span className="metric-icon">{Icons.package}</span></div>
+              <strong>{data.total_packs}</strong>
+              <div className="metric-foot">
+                <span className={attentionCount > 0 ? 'warning' : 'positive'}>
+                  {attentionCount > 0 ? `${attentionCount} need attention` : 'No pending items'}
+                </span>
+                <small>{data.total_shoots} total shoots</small>
+              </div>
+            </article>
+          </a>
+          <a href="/analytics" className="section-link" style={{ textDecoration: 'none' }}>
+            <article className="metric-card">
+              <div className="metric-top"><span>Revenue this month</span><span className="metric-icon">{Icons.dollar}</span></div>
+              <strong>{formatCurrency(data.revenue)}</strong>
+              <div className="metric-foot">
+                <span className="positive">{data.active_models > 0 ? 'From analytics' : 'No data yet'}</span>
+                <small>Across all personas</small>
+              </div>
+            </article>
+          </a>
+          <a href="/settings" className="section-link" style={{ textDecoration: 'none' }}>
+            <article className="metric-card">
+              <div className="metric-top"><span>System health</span><span className="metric-icon">{Icons.trending}</span></div>
+              <strong>{data.health.online}/{data.health.total}</strong>
+              <div className="metric-foot">
+                <span className={data.health.online === data.health.total ? 'positive' : 'warning'}>
+                  {data.health.online === data.health.total ? 'All services online' : `${data.health.total - data.health.online} degraded`}
+                </span>
+                <small>Provider status</small>
+              </div>
+            </article>
+          </a>
         </section>
 
         {/* Dashboard grid */}
         <section className="dashboard-grid">
           <article className="panel revenue-panel">
+            <a href="/analytics" className="panel-head-link" style={{ display: 'block', color: 'inherit', textDecoration: 'none' }}>
             <div className="panel-head">
               <div>
                 <span className="kicker">Revenue trajectory</span>
@@ -173,6 +196,7 @@ export default function Dashboard() {
             <div className="chart-labels">
               <span>SEP</span><span>NOV</span><span>JAN</span><span>MAR</span><span>MAY</span><span>JUL</span><span>AUG</span>
             </div>
+            </a>
           </article>
 
           <article className="panel production-panel">
@@ -197,7 +221,8 @@ export default function Dashboard() {
                     return null
                   })() : null
                   return (
-                    <div key={shoot.id} className="job-row">
+                    <a key={shoot.id} href="/production" className="job-row-link" style={{ textDecoration: 'none', color: 'inherit', display: 'block' }}>
+                    <div className="job-row">
                       <span className="job-icon" style={shootImgUrl ? { overflow: 'hidden', borderRadius: 6 } : {}}>
                         {shootImgUrl ? (
                           <img src={shootImgUrl} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
@@ -209,6 +234,7 @@ export default function Dashboard() {
                       <div className="progress-wrap"><div><i style={{ width: `${shoot.progress}%` }}></i></div>                    <span>{Math.round(shoot.progress)}%</span></div>
                       <em className={`status ${shoot.status}`}>{shoot.status.toUpperCase()}</em>
                     </div>
+                    </a>
                   )
                 })}
               </div>
@@ -226,19 +252,21 @@ export default function Dashboard() {
                 <p><b>No pending approvals</b><small>All workflows are running smoothly</small></p>
               </div>
             ) : data.attention_items.map(item => (
-              <button key={item.id} className="attention-item">
+              <a key={item.id} href={`/personas/${item.id}`} className="attention-item" style={{ textDecoration: 'none', color: 'inherit' }}>
                 <span className="attention-icon amber">{Icons.shield}</span>
                 <p><b>{item.name}</b><small>{item.type.replace(/_/g, ' ')}</small></p>
                 <span><b>Review</b>{Icons.arrowRight}</span>
-              </button>
+              </a>
             ))}
           </article>
 
           <article className="panel capacity-panel">
+            <a href="/settings" className="panel-title-link" style={{ textDecoration: 'none', color: 'inherit' }}>
             <div className="panel-title">
               <div><span className="kicker">Infrastructure</span><h3>System health</h3></div>
               {Icons.cpu}
             </div>
+            </a>
             {data.health.checks.map(check => (
               <div key={check.service} className="capacity">
                 <div><p>{check.service}</p><span>{check.status === 'green' ? 'Operational' : check.status === 'yellow' ? 'Degraded' : 'Offline'}</span></div>

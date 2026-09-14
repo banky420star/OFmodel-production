@@ -72,6 +72,7 @@ class HuggingFaceImageProvider(ImageProvider):
         seed: int = -1,
         lora_path: str = "",
         lora_strength: float = 0.8,
+        session_id: str = "",
     ) -> ProviderResult:
         start = time.monotonic()
 

@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models import (
-    Workflow, WorkflowStep, Job, Persona, QAResult,
+    Workflow, WorkflowStep, Job, Persona, QAResult, Identity,
     WorkflowStatus,
 )
 from app.schemas import (
@@ -59,12 +59,15 @@ async def get_workflow_steps(workflow_id: UUID, db: AsyncSession = Depends(get_d
 @router.get("/jobs")
 async def list_jobs(
     persona_id: UUID | None = None,
+    status: str | None = None,
     db: AsyncSession = Depends(get_db),
 ):
     from app.models import Job
     q = select(Job).order_by(Job.created_at.desc())
     if persona_id:
         q = q.where(Job.persona_id == persona_id)
+    if status:
+        q = q.where(Job.status == status)
     result = await db.execute(q)
     jobs = result.scalars().all()
     return [
@@ -97,10 +100,12 @@ async def get_job(job_id: UUID, db: AsyncSession = Depends(get_db)):
         "job_type": job.type,
         "status": job.status,
         "progress": job.progress,
+        "message": job.message,
         "current_step": job.metadata_json.get("current_step") if job.metadata_json else None,
         "total_steps": job.metadata_json.get("total_steps") if job.metadata_json else None,
         "result": job.metadata_json.get("result") if job.metadata_json else None,
         "error": job.message,
+        "metadata_json": job.metadata_json or {},
         "created_at": job.created_at.isoformat() if job.created_at else None,
         "updated_at": job.updated_at.isoformat() if job.updated_at else None,
     }
@@ -110,8 +115,13 @@ async def get_job(job_id: UUID, db: AsyncSession = Depends(get_db)):
 
 @router.get("/personas/{persona_id}/qa", response_model=list[QAResponse])
 async def list_qa_results(persona_id: UUID, db: AsyncSession = Depends(get_db)):
+    # QAResult has no persona_id column — reach the persona through the
+    # identity that the QA check validated.
     result = await db.execute(
-        select(QAResult).where(QAResult.persona_id == persona_id).order_by(QAResult.created_at.desc())
+        select(QAResult)
+        .join(Identity, Identity.id == QAResult.identity_id)
+        .where(Identity.persona_id == persona_id)
+        .order_by(QAResult.created_at.desc())
     )
     return result.scalars().all()
 

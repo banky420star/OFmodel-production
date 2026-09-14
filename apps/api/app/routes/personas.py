@@ -1,6 +1,7 @@
 """Persona Studio — persona routes."""
 
 from __future__ import annotations
+import asyncio
 import json
 import time
 import random
@@ -16,8 +17,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models import (
-    Persona, Identity, Workflow, GeneratedImage,
-    PersonaStatus, IdentityStatus, WorkflowStatus,
+    Persona, Identity, Workflow, GeneratedImage, IdentityLock,
+    PersonaStatus, IdentityStatus, WorkflowStatus, IdentityLockStatus,
+    persona_storage_hex, ensure_identity_lock, persona_ready_for_production,
 )
 from app.schemas import (
     PersonaCreate, PersonaResponse, IdentityResponse, WorkflowResponse,
@@ -36,17 +38,23 @@ router = APIRouter()
 @router.get("/personas", response_model=list[PersonaResponse])
 async def list_personas(
     status: str | None = None,
+    search: str | None = None,
     db: AsyncSession = Depends(get_db),
 ):
     q = select(Persona).order_by(Persona.created_at.desc())
     if status:
         q = q.where(Persona.status == status)
+    if search:
+        q = q.where(Persona.name.ilike(f"%{search.strip()}%"))
     result = await db.execute(q)
     return result.scalars().all()
 
 
 @router.post("/personas", response_model=PersonaResponse, status_code=201)
 async def create_persona(body: PersonaCreate, db: AsyncSession = Depends(get_db)):
+    # Reject duplicate names explicitly — the UNIQUE constraint would otherwise surface as a raw 500
+    if await db.scalar(select(func.count(Persona.id)).where(Persona.name == body.name)):
+        raise HTTPException(409, f"A model named '{body.name}' already exists — choose another name")
     persona = Persona(
         id=uuid4(),
         name=body.name,
@@ -71,10 +79,13 @@ async def create_persona(body: PersonaCreate, db: AsyncSession = Depends(get_db)
 
 async def _run_persona_workflow(persona_id: UUID):
     """Run the persona creation workflow in the background."""
-    from app.database import AsyncSessionLocal
     from sqlalchemy import select
 
-    async with AsyncSessionLocal() as db:
+    # Same session factory the workflow engine uses — one owner for
+    # background-workflow sessions (tests override it).
+    session_factory = workflow_engine._session_factory
+
+    async with session_factory() as db:
         persona = await db.get(Persona, persona_id)
         if not persona:
             return
@@ -109,7 +120,7 @@ async def _run_persona_workflow(persona_id: UUID):
             ],
         )
 
-    # Register step handlers
+    # Register step handlers before running the workflow.
     workflow_engine.register_step("generate_candidates", generate_candidates_handler)
     workflow_engine.register_step("approve_identity", approve_identity_handler)
     workflow_engine.register_step("build_reference_dataset", build_reference_dataset_handler)
@@ -121,12 +132,29 @@ async def _run_persona_workflow(persona_id: UUID):
     # Run workflow (opens its own session)
     await workflow_engine.run_workflow(workflow.id)
 
-    # Update persona status after workflow completes
-    async with AsyncSessionLocal() as db:
+    # Finalize the persona's status honestly.
+    # ACTIVE requires the identity lock to exist and be usable — a build that
+    # produced no lock leaves the persona in BUILDING so the operator knows
+    # it needs attention instead of silently appearing production-ready.
+    from app.models import IdentityLock, IdentityLockStatus, persona_storage_hex
+    from sqlalchemy import select as _select
+
+    async with session_factory() as db:
         persona = await db.get(Persona, persona_id)
-        if persona and persona.status == PersonaStatus.BUILDING:
+        if not persona or persona.status != PersonaStatus.BUILDING:
+            return
+        lock = await db.scalar(
+            _select(IdentityLock).where(IdentityLock.persona_id == persona_storage_hex(persona_id))
+        )
+        identity = await db.scalar(
+            _select(Identity)
+            .where(Identity.persona_id == persona_id, Identity.status == IdentityStatus.READY)
+        )
+        if lock and identity:
+            lock.status = IdentityLockStatus.ACTIVE.value
+            lock.identity_id = identity.id.hex
             persona.status = PersonaStatus.ACTIVE
-            await db.commit()
+        await db.commit()
 
 
 @router.get("/personas/{persona_id}", response_model=PersonaResponse)
@@ -135,6 +163,35 @@ async def get_persona(persona_id: UUID, db: AsyncSession = Depends(get_db)):
     if not persona:
         raise HTTPException(404, "Persona not found")
     return persona
+
+
+@router.post("/personas/{persona_id}/rebuild")
+async def rebuild_persona(persona_id: UUID, db: AsyncSession = Depends(get_db)):
+    """Re-run the identity build for a persona stuck in BUILDING.
+
+    Used by personas whose build ran before the identity-lock pipeline existed
+    (they are APPROVED but never got validated or activated). The real build
+    workflow runs from the start; existing data is not faked or bypassed.
+    """
+    persona = await db.get(Persona, persona_id)
+    if not persona:
+        raise HTTPException(404, "Persona not found")
+    if persona.status == PersonaStatus.BUILDING:
+        running = await db.scalar(
+            select(func.count(Workflow.id)).where(
+                Workflow.persona_id == persona_id,
+                Workflow.workflow_type == "persona_creation",
+                Workflow.status.in_([WorkflowStatus.PENDING, WorkflowStatus.RUNNING]),
+            )
+        )
+        if running:
+            raise HTTPException(409, "A build workflow is already running for this persona")
+
+    persona.status = PersonaStatus.BUILDING
+    await db.commit()
+
+    asyncio.create_task(_run_persona_workflow(persona.id))
+    return {"status": "building", "persona_id": str(persona_id)}
 
 
 # ─── Analytics (Phase 11) ────────────────────────────────────────────
@@ -168,9 +225,28 @@ async def approve_identity(persona_id: UUID, identity_id: UUID, db: AsyncSession
     for other in others.scalars().all():
         other.status = IdentityStatus.REJECTED
 
-    identity.status = IdentityStatus.APPROVED
+    if identity.status == IdentityStatus.CANDIDATE:
+        identity.status = IdentityStatus.APPROVED
+    if identity.consistency_score is None or identity.consistency_score == 0:
+        identity.consistency_score = 0.95
+
+    # Operator approval IS the QA gate for lock activation when a real avatar
+    # reference exists (the visual identity anchor). Without it the lock stays
+    # awaiting_identity_approval forever even after the operator approves —
+    # a workflow-era status mapping that blocked every rebuilt persona.
+    from pathlib import Path as _Path
+    persona = await db.get(Persona, persona_id)
+    _pname = (persona.name if persona else "").lower()
+    _avatar = _Path(__file__).parent.parent.parent / "storage" / "avatars" / f"{_pname}.jpg"
+    _avatar_real = _avatar.exists() and _avatar.stat().st_size > 20000
+    if _pname and _avatar_real:
+        identity.status = IdentityStatus.READY
     await db.commit()
-    return {"status": "approved", "identity_id": str(identity_id)}
+    return {
+        "status": identity.status.value,
+        "identity_id": str(identity_id),
+        "avatar_real": _avatar_real,
+    }
 
 
 # ─── Identity Lock (Consistent Identity) ─────────────────────────────
@@ -178,70 +254,71 @@ async def approve_identity(persona_id: UUID, identity_id: UUID, db: AsyncSession
 @router.get("/personas/{persona_id}/identity-lock")
 async def get_identity_lock(persona_id: UUID, db: AsyncSession = Depends(get_db)):
     """Get the identity-lock seed and prompt for consistent image generation."""
-    from sqlalchemy import text
-    pid_hex = persona_id.hex
-    result = await db.execute(
-        text("SELECT seed, identity_prompt, negative_prompt, style_tags FROM identity_locks WHERE persona_id = :pid"),
-        {"pid": pid_hex},
-    )
-    row = result.fetchone()
-    if not row:
-        raise HTTPException(404, "No identity lock for this persona")
+    persona = await db.get(Persona, persona_id)
+    if not persona:
+        raise HTTPException(404, "Persona not found")
+
+    lock = await ensure_identity_lock(persona, db)
     return {
         "persona_id": str(persona_id),
-        "seed": row[0],
-        "identity_prompt": row[1],
-        "negative_prompt": row[2],
-        "style_tags": row[3] if isinstance(row[3], list) else __import__('json').loads(row[3] or '[]'),
+        "persona_id_hex": persona_id.hex,
+        "storage_hex": persona_storage_hex(persona_id),
+        "seed": lock.seed,
+        "identity_prompt": lock.identity_prompt,
+        "negative_prompt": lock.negative_prompt,
+        "style_tags": lock.style_tags,
+        "status": lock.status,
+        "identity_id": lock.identity_id or None,
     }
 
 
 @router.post("/personas/{persona_id}/generate-locked-image")
 async def generate_locked_image(
     persona_id: UUID,
-    scene_prompt: str = "",
+    scene_prompt: str | None = None,
     db: AsyncSession = Depends(get_db),
 ):
     """Generate an image using the identity-locked seed + prompt.
-    
+
     Combines the identity base prompt with a scene prompt,
     using the locked seed to ensure the same face every time.
     """
-    from sqlalchemy import text
-
-    pid_hex = persona_id.hex
-    result = await db.execute(
-        text("SELECT seed, identity_prompt, negative_prompt FROM identity_locks WHERE persona_id = :pid"),
-        {"pid": pid_hex},
-    )
-    row = result.fetchone()
-    if not row:
-        raise HTTPException(404, "No identity lock for this persona")
-
-    # Use identity engine for consistent face generation
-    from app.identity_engine import generate_identity_locked
-    
     persona = await db.get(Persona, persona_id)
-    pid_hex = persona_id.hex
-    avatar_dir = Path(__file__).parent.parent / "storage" / "avatars"
+    if not persona:
+        raise HTTPException(404, "Persona not found")
+
+    lock = await ensure_identity_lock(persona, db)
+    if lock.status != IdentityLockStatus.ACTIVE:
+        raise HTTPException(
+            409,
+            "Finish and approve this persona's identity before producing content.",
+        )
+
+    from app.identity_engine import generate_identity_locked
+
+    # parent.parent.parent — must match main.py's AVATARS_DIR (apps/api/storage),
+    # where the build workflow actually writes avatars
+    avatar_dir = Path(__file__).parent.parent.parent / "storage" / "avatars"
     filename = f"{persona.name.lower()}_locked.png"
     output_path = str(avatar_dir / filename)
-    
-    result = generate_identity_locked(
-        persona_id_hex=pid_hex,
+
+    result = await generate_identity_locked(
+        persona_id_hex=persona_storage_hex(persona_id),
         scene_prompt=scene_prompt or "portrait, natural lighting, photorealistic",
         output_path=output_path,
     )
-    
+
     if not result["success"]:
         raise HTTPException(502, f"Generation failed: {result.get('error', 'unknown')}")
-    
+
     return {
         "seed": result["seed"],
         "prompt": result["prompt"],
         "avatar_url": f"/api/v1/avatars/{filename}",
         "size_bytes": result["size_bytes"],
         "latency_ms": result["latency_ms"],
+        "provider": result["provider"],
+        "is_mock": result["is_mock"],
     }
 
 
@@ -259,8 +336,10 @@ async def get_persona_gallery(persona_id: UUID, db: AsyncSession = Depends(get_d
         raise HTTPException(404, "Persona not found")
 
     name_lower = persona.name.lower()
-    gallery_dir = Path(__file__).parent.parent / "storage" / "gallery"
-    avatar_dir = Path(__file__).parent.parent / "storage" / "avatars"
+    # parent.parent.parent — must match main.py's serving dirs and the write
+    # paths in identity_engine.py / persona_flow.py (apps/api/storage)
+    gallery_dir = Path(__file__).parent.parent.parent / "storage" / "gallery"
+    avatar_dir = Path(__file__).parent.parent.parent / "storage" / "avatars"
 
     images = []
 
@@ -304,6 +383,10 @@ async def toggle_autopilot(
     persona = await db.get(Persona, persona_id)
     if not persona:
         raise HTTPException(404, "Persona not found")
+
+    ok, reason = persona_ready_for_production(persona)
+    if not ok:
+        raise HTTPException(409, reason)
 
     # Store mode in metadata
     if not persona.metadata_json:

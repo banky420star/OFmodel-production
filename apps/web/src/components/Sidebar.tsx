@@ -35,6 +35,7 @@ const icons = {
 
 export default function Sidebar() {
   const pathname = usePathname()
+  const [open, setOpen] = useState(false)
   const [shootCount, setShootCount] = useState(0)
   const [healthChecks, setHealthChecks] = useState<{ service: string; status: string }[]>([])
 
@@ -46,6 +47,22 @@ export default function Sidebar() {
       })
       .catch(() => {})
   }, [])
+
+  // The per-page topbars render a .mobile-menu button; clicking any of them
+  // opens this sidebar (click delegation — no per-page wiring needed). Tapping
+  // the dimmed backdrop closes it.
+  useEffect(() => {
+    const onDocClick = (e: MouseEvent) => {
+      const t = e.target as HTMLElement
+      if (t.closest?.('.mobile-menu')) setOpen(true)
+      else if (open && !t.closest?.('.sidebar')) setOpen(false)
+    }
+    document.addEventListener('click', onDocClick)
+    return () => document.removeEventListener('click', onDocClick)
+  }, [open])
+
+  // Route changes (including tapping a nav item on mobile) close the drawer
+  useEffect(() => { setOpen(false) }, [pathname])
 
   const isActive = (href: string) => {
     if (href === '/') return pathname === '/'
@@ -63,11 +80,13 @@ export default function Sidebar() {
     { label: 'Overview', href: '/', icon: icons.overview },
     { label: 'Models', href: '/models', icon: icons.models },
     { label: 'Production', href: '/production', icon: icons.production, badge: shootCount },
+    { label: 'Managers', href: '/manager', icon: icon(<><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></>) },
     { label: 'Chat', href: '/chat', icon: icons.chat },
     { label: 'Mailboxes', href: '/mailbox', icon: icon(<><rect width="20" height="14" x="2" y="5" rx="2"/><path d="M22 5v14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></>) },
     { label: 'Socials', href: '/socials', icon: icon(<><path d="M18 2h-3a5 5 0 0 0-5 5v3H7v4h3v8h4v-8h3l1-4h-4V7a1 1 0 0 1 1-1h3z"/></>) },
     { label: 'Calendar', href: '/calendar', icon: icons.calendar },
     { label: 'Analytics', href: '/analytics', icon: icons.analytics },
+    { label: 'Monetization', href: '/monetization', icon: icon(<><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/></>) },
   ]
 
   const systemItems: NavItem[] = [
@@ -77,13 +96,13 @@ export default function Sidebar() {
   ]
 
   return (
-    <aside className="sidebar">
+    <aside className={open ? 'sidebar open' : 'sidebar'}>
       <div className="brand">
         <span className="brand-mark">{sparkles}</span>
         <span>Persona<span>Studio</span></span>
       </div>
 
-      <button className="sidebar-close" aria-label="Close menu">
+      <button className="sidebar-close" aria-label="Close menu" onClick={() => setOpen(false)}>
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
       </button>
 

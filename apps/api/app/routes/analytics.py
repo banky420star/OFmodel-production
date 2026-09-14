@@ -18,6 +18,7 @@ from app.models import (
     Persona, Identity, AnalyticsSnapshot, Forecast, Shoot, ContentPack,
     PersonaStatus, ShootStatus,
 )
+from app.routes.personas import ManualAnalyticsInput
 from app.schemas import (
     AnalyticsSnapshotResponse, ForecastResponse, ForecastScenario,
 )

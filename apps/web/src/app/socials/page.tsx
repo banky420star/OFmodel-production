@@ -1,12 +1,48 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { Toast, type ToastState } from '@/components/ui/Toast'
 import {
   listSocialAccounts, requestSocialAccount, approveSocialAccount,
   rejectSocialAccount, activateSocialAccount, listPersonas,
   generateAccountEmail, checkAccountEmails,
   syncProfile, bulkSyncProfiles, storeCredentials,
+  startFullAutoSignup, getFullAutoSignupStatus,
+  getSocialWorkerStatus, runSocialWorkerOnce, connectSocialApi, disconnectSocialApi,
 } from '@/lib/api'
+
+interface WorkerPlatformInfo {
+  id: string
+  label: string
+  has_official_api: boolean
+  auth: string
+  credential_source: string
+  restricted_note: string
+  accounts: number
+}
+
+interface WorkerStatus {
+  platforms: WorkerPlatformInfo[]
+  accounts: Record<string, Array<{
+    id: string
+    username: string
+    status: string
+    api_connected: boolean
+    has_token: boolean
+    last_sync: { ok: boolean; detail: string; at: string } | null
+  }>>
+}
+
+interface FullAutoProgress {
+  live: boolean
+  stale: boolean
+  state: string | null
+  stage: string | null
+  progress: number | null
+  code: string | null
+  profile_url: string
+  account_status: string
+}
 
 interface SocialAccount {
   id: string
@@ -66,14 +102,53 @@ export default function SocialsPage() {
   const [requesting, setRequesting] = useState(false)
   const [form, setForm] = useState({ persona_id: '', platform: 'instagram', username: '', display_name: '', email: '', bio: '' })
   const [actionLoading, setActionLoading] = useState<string | null>(null)
+  const [rejectingId, setRejectingId] = useState<string | null>(null)
+  const [rejectReason, setRejectReason] = useState<Record<string, string>>({})
+  const [toast, setToast] = useState<ToastState>(null)
+  const [fullautoId, setFullautoId] = useState<string | null>(null)
+  const [fullauto, setFullauto] = useState<FullAutoProgress | null>(null)
+  const [workerStatus, setWorkerStatus] = useState<WorkerStatus | null>(null)
+  const [workerBusy, setWorkerBusy] = useState(false)
+  const [connectId, setConnectId] = useState<string | null>(null)
+  const [connectToken, setConnectToken] = useState('')
+  const notify = (msg: string, type: 'success' | 'error' = 'success') => setToast({ msg, type })
+
+  // Live progress polling while a full-auto signup runs.
+  useEffect(() => {
+    if (!fullautoId) return
+    let stopped = false
+    const tick = async () => {
+      try {
+        const s: any = await getFullAutoSignupStatus(fullautoId)
+        if (stopped) return
+        setFullauto(s)
+        if (s.state === 'done' || s.state === 'failed' || s.stale) {
+          notify(
+            s.state === 'done'
+              ? `Full-auto signup finished: ${s.profile_url || 'session captured — check the account row'}`
+              : s.state === 'failed'
+                ? `Full-auto signup failed: ${s.stage || 'unknown stage'}`
+                : 'Full-auto signup run went stale — you can re-launch',
+            s.state === 'done' ? 'success' : 'error'
+          )
+          setFullautoId(null)
+        }
+      } catch { /* transient */ }
+    }
+    tick()
+    const iv = setInterval(tick, 2000)
+    return () => { stopped = true; clearInterval(iv) }
+  }, [fullautoId])
 
   const refresh = () => {
     Promise.all([
       listSocialAccounts().catch(() => []),
       listPersonas().catch(() => []),
-    ]).then(([accts, pers]: [any[], any[]]) => {
+      getSocialWorkerStatus().catch(() => null),
+    ]).then(([accts, pers, worker]: [any[], any[], WorkerStatus | null]) => {
       setAccounts(accts)
       setPersonas(pers)
+      setWorkerStatus(worker)
       setLoading(false)
     })
   }
@@ -96,7 +171,7 @@ export default function SocialsPage() {
       setShowRequestForm(false)
       refresh()
     } catch (e: any) {
-      alert(e.message || 'Failed to submit request')
+      notify(e.message || 'Failed to submit request', 'error')
     }
     setRequesting(false)
   }
@@ -105,22 +180,26 @@ export default function SocialsPage() {
     setActionLoading(id)
     try {
       await approveSocialAccount(id, 'Approved — ready to activate')
+      notify('Account approved')
       refresh()
     } catch (e: any) {
-      alert(e.message)
+      notify(e.message, 'error')
     }
     setActionLoading(null)
   }
 
   const handleReject = async (id: string) => {
-    const reason = prompt('Rejection reason:')
+    const reason = rejectReason[id]?.trim()
     if (!reason) return
     setActionLoading(id)
     try {
       await rejectSocialAccount(id, reason)
+      notify('Account rejected')
+      setRejectReason(prev => ({ ...prev, [id]: '' }))
+      setRejectingId(null)
       refresh()
     } catch (e: any) {
-      alert(e.message)
+      notify(e.message, 'error')
     }
     setActionLoading(null)
   }
@@ -129,9 +208,23 @@ export default function SocialsPage() {
     setActionLoading(id)
     try {
       await activateSocialAccount(id)
+      notify('Account activated')
       refresh()
     } catch (e: any) {
-      alert(e.message)
+      notify(e.message, 'error')
+    }
+    setActionLoading(null)
+  }
+
+  const handleFullAutoSignup = async (id: string) => {
+    setActionLoading(id)
+    try {
+      await startFullAutoSignup(id)
+      setFullautoId(id)
+      setFullauto({ live: true, stale: false, state: 'launching', stage: 'Launching…', progress: 0, code: null, profile_url: '', account_status: 'signup_in_progress' })
+      notify('Full-auto signup launched — a visible Chrome window is opening on this machine')
+    } catch (e: any) {
+      notify(e.message, 'error')
     }
     setActionLoading(null)
   }
@@ -144,15 +237,15 @@ export default function SocialsPage() {
       })
       const data = await res.json()
       if (res.ok) {
-        alert(data.success
-          ? `${data.message}\n\nPlatform: ${data.platform}\nUsername: ${data.username}\nEmail: ${data.email}\n\nCheck inbox at ${data.email} for verification.`
-          : `${data.message}\n\nStatus: ${data.status}`)
+        notify(data.success
+          ? `${data.message} — check inbox at ${data.email} for verification`
+          : `${data.message} (status: ${data.status})`, data.success ? 'success' : 'error')
       } else {
-        alert(data.detail || data.message || 'Signup failed')
+        notify(data.detail || data.message || 'Signup failed', 'error')
       }
       refresh()
     } catch (e: any) {
-      alert('Auto-signup failed: ' + e.message)
+      notify('Auto-signup failed: ' + e.message, 'error')
     }
     setActionLoading(null)
   }
@@ -188,8 +281,8 @@ export default function SocialsPage() {
                 onClick={async () => {
                   try {
                     const r: any = await bulkSyncProfiles()
-                    alert(`Synced ${r.synced} of ${r.total} active accounts`)
-                  } catch (e: any) { alert(e.message) }
+                    notify(`Synced ${r.synced} of ${r.total} active accounts`)
+                  } catch (e: any) { notify(e.message, 'error') }
                 }}
                 style={{
                   padding: '10px 18px', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer',
@@ -241,6 +334,108 @@ export default function SocialsPage() {
             </div>
           ))}
         </div>
+
+        {/* Always-on worker panel — official APIs only, honest status */}
+        {workerStatus && (
+          <div className="panel" style={{ padding: '14px 18px', marginBottom: 20 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+              <div style={{ fontWeight: 600, fontSize: 13 }}>
+                ⚙️ Always-on worker — official platform APIs only
+              </div>
+              <button
+                onClick={async () => {
+                  setWorkerBusy(true)
+                  try {
+                    const r: any = await runSocialWorkerOnce()
+                    if (!r.ran) notify(`Worker pass: ${r.reason}`, 'success')
+                    else notify(`Pass done: ${r.succeeded} ok, ${r.failed} failed of ${r.eligible} eligible`, r.failed ? 'error' : 'success')
+                    refresh()
+                  } catch (e: any) { notify(e.message, 'error') }
+                  setWorkerBusy(false)
+                }}
+                disabled={workerBusy}
+                style={{
+                  padding: '6px 14px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                  border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'var(--text)',
+                }}
+              >
+                {workerBusy ? 'Running…' : 'Run Now'}
+              </button>
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {workerStatus.platforms.map(p => (
+                <div key={p.id} title={p.has_official_api ? p.credential_source : p.restricted_note}
+                  style={{
+                    padding: '8px 12px', borderRadius: 8, minWidth: 130, flex: '1 1 150px',
+                    border: `1px solid ${p.has_official_api ? 'var(--border)' : 'rgba(239,68,68,0.25)'}`,
+                    background: p.has_official_api ? 'transparent' : 'rgba(239,68,68,0.04)',
+                    opacity: p.has_official_api ? 1 : 0.75,
+                  }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ fontSize: 14 }}>{PLATFORMS.find(x => x.id === p.id)?.icon || '📱'}</span>
+                    <span style={{ fontSize: 12, fontWeight: 600 }}>{p.label}</span>
+                    <span style={{
+                      marginLeft: 'auto', fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 4,
+                      background: p.has_official_api ? 'rgba(217,251,113,0.12)' : 'rgba(239,68,68,0.10)',
+                      color: p.has_official_api ? 'var(--green)' : '#EF4444',
+                    }}>{p.has_official_api ? 'API OK' : 'NO API'}</span>
+                  </div>
+                  <div className="muted-sm" style={{ fontSize: 10, marginTop: 4 }}>
+                    {p.has_official_api ? `${p.auth} · ${p.accounts} acct` : p.restricted_note.slice(0, 44)}
+                  </div>
+                  {p.has_official_api && p.accounts > 0 && (() => {
+                    const list = workerStatus.accounts[p.id] || []
+                    const connected = list.filter(a => a.has_token).length
+                    return (
+                      <div style={{ fontSize: 10, color: connected > 0 ? 'var(--green)' : 'var(--text-muted)', marginTop: 2 }}>
+                        {connected}/{list.length} connected
+                      </div>
+                    )
+                  })()}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Full-auto live progress panel */}
+        {fullauto && fullautoId && (
+          <div className="panel" style={{
+            padding: '14px 18px', marginBottom: 20,
+            border: '1px solid rgba(34,197,94,0.4)',
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <div style={{ fontWeight: 600, fontSize: 13, color: '#22C55E' }}>
+                🤖 Full-auto signup — live progress
+              </div>
+              <div className="muted-sm">
+                {fullauto.state === 'done' ? 'DONE' : fullauto.state === 'failed' ? 'FAILED' : 'RUNNING'}
+              </div>
+            </div>
+            <div style={{
+              height: 8, borderRadius: 4, overflow: 'hidden',
+              background: 'rgba(255,255,255,0.06)', marginBottom: 8,
+            }}>
+              <div style={{
+                height: '100%', width: `${fullauto.progress ?? 0}%`,
+                background: fullauto.state === 'failed' ? '#EF4444' : '#22C55E',
+                transition: 'width 0.5s ease',
+              }} />
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--text)' }}>
+              {fullauto.stage || 'Working…'}
+            </div>
+            {fullauto.code && (
+              <div style={{ fontSize: 12, color: '#818CF8', marginTop: 4, fontFamily: 'monospace' }}>
+                Code received: {fullauto.code}
+              </div>
+            )}
+            <div className="muted-sm" style={{ marginTop: 6 }}>
+              A visible Chrome window is driving the signup on this machine — watch it there.
+              The robot fills the form, fetches the email code, and types it in.
+            </div>
+          </div>
+        )}
 
         {/* Request form */}
         {showRequestForm && (
@@ -389,14 +584,37 @@ export default function SocialsPage() {
                   padding: '14px 18px', display: 'flex', alignItems: 'center', gap: 16,
                   border: `1px solid ${account.status === 'pending_approval' ? 'rgba(251,191,36,0.3)' : 'var(--border)'}`,
                 }}>
-                  {/* Platform icon */}
-                  <div style={{
-                    width: 40, height: 40, borderRadius: 10, display: 'flex', alignItems: 'center',
-                    justifyContent: 'center', fontSize: 20, flexShrink: 0,
-                    background: `${platform?.color || '#666'}15`,
-                  }}>
-                    {platform?.icon || '📱'}
-                  </div>
+                  {/* Platform icon — links to the live profile when one exists */}
+                  {account.profile_url ? (
+                    <a
+                      href={account.profile_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title={`Open @${account.username} on ${platform?.label || account.platform}`}
+                      style={{
+                        width: 40, height: 40, borderRadius: 10, display: 'flex', alignItems: 'center',
+                        justifyContent: 'center', fontSize: 20, flexShrink: 0, position: 'relative',
+                        background: `${platform?.color || '#666'}15`,
+                        border: `1px solid ${platform?.color || '#666'}55`,
+                        textDecoration: 'none', cursor: 'pointer',
+                      }}
+                    >
+                      {platform?.icon || '📱'}
+                      <span style={{
+                        position: 'absolute', top: -5, right: -5, width: 15, height: 15, borderRadius: 8,
+                        background: 'var(--green)', color: '#000', fontSize: 9, lineHeight: '15px',
+                        textAlign: 'center', fontWeight: 700,
+                      }}>↗</span>
+                    </a>
+                  ) : (
+                    <div style={{
+                      width: 40, height: 40, borderRadius: 10, display: 'flex', alignItems: 'center',
+                      justifyContent: 'center', fontSize: 20, flexShrink: 0,
+                      background: `${platform?.color || '#666'}15`,
+                    }}>
+                      {platform?.icon || '📱'}
+                    </div>
+                  )}
 
                   {/* Account info */}
                   <div style={{ flex: 1, minWidth: 0 }}>
@@ -474,8 +692,9 @@ export default function SocialsPage() {
                           setActionLoading(account.id)
                           try {
                             await generateAccountEmail(account.id)
+                            notify('New inbox created — email address assigned')
                             refresh()
-                          } catch (e: any) { alert(e.message) }
+                          } catch (e: any) { notify(e.message, 'error') }
                           setActionLoading(null)
                         }}
                         disabled={actionLoading === account.id}
@@ -493,10 +712,13 @@ export default function SocialsPage() {
                           setActionLoading(account.id)
                           try {
                             const result: any = await checkAccountEmails(account.id)
-                            alert(result.count > 0
-                              ? `${result.count} email(s) received:\n${result.emails.map((e: any) => `From: ${e.from?.address || 'unknown'}\nSubject: ${e.subject}\n${e.intro || ''}`).join('\n---\n')}`
-                              : 'No emails received yet. Check again after signing up on the platform.')
-                          } catch (e: any) { alert(e.message) }
+                            if (result.count > 0) {
+                              const subjects = result.emails.map((e: any) => e.subject).join(', ')
+                              notify(`${result.count} email(s): ${subjects}`)
+                            } else {
+                              notify('Inbox empty — check again after signing up on the platform', 'error')
+                            }
+                          } catch (e: any) { notify(e.message, 'error') }
                           setActionLoading(null)
                         }}
                         disabled={actionLoading === account.id}
@@ -508,7 +730,19 @@ export default function SocialsPage() {
                         Check Inbox
                       </button>
                     )}
-                    {account.email && account.status === 'pending_approval' && account.platform !== 'onlyfans' && (
+                    {account.email && account.platform === 'instagram' && ['pending_approval', 'approved', 'signup_in_progress'].includes(account.status) && (
+                      <button
+                        onClick={() => handleFullAutoSignup(account.id)}
+                        disabled={actionLoading === account.id || (fullautoId === account.id)}
+                        style={{
+                          padding: '6px 12px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                          background: 'rgba(34,197,94,0.12)', color: '#22C55E', border: 'none',
+                        }}
+                      >
+                        {fullautoId === account.id ? 'Running…' : '🤖 Full-Auto Sign Up'}
+                      </button>
+                    )}
+                    {account.email && account.platform !== 'instagram' && account.platform !== 'onlyfans' && ['pending_approval', 'approved'].includes(account.status) && (
                       <button
                         onClick={() => handleAutoSignup(account.id)}
                         disabled={actionLoading === account.id}
@@ -532,15 +766,28 @@ export default function SocialsPage() {
                         >
                           {actionLoading === account.id ? '...' : 'Approve'}
                         </button>
+                        {rejectingId === account.id && (
+                          <input
+                            autoFocus
+                            placeholder="Rejection reason…"
+                            value={rejectReason[account.id] || ''}
+                            onChange={e => setRejectReason(prev => ({ ...prev, [account.id]: e.target.value }))}
+                            onKeyDown={e => { if (e.key === 'Enter') handleReject(account.id); if (e.key === 'Escape') setRejectingId(null) }}
+                            style={{
+                              padding: '6px 10px', borderRadius: 6, fontSize: 12, width: 170,
+                              background: 'var(--bg-card)', color: 'var(--text)', border: '1px solid var(--border)', outline: 'none',
+                            }}
+                          />
+                        )}
                         <button
-                          onClick={() => handleReject(account.id)}
+                          onClick={() => rejectingId === account.id ? handleReject(account.id) : setRejectingId(account.id)}
                           disabled={actionLoading === account.id}
                           style={{
                             padding: '6px 12px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
                             background: 'rgba(239,68,68,0.12)', color: '#EF4444', border: 'none',
                           }}
                         >
-                          Reject
+                          {rejectingId === account.id ? 'Confirm' : 'Reject'}
                         </button>
                       </>
                     )}
@@ -562,8 +809,9 @@ export default function SocialsPage() {
                           setActionLoading(account.id)
                           try {
                             await syncProfile(account.id)
+                            notify('Profile synced from platform')
                             refresh()
-                          } catch (e: any) { alert(e.message) }
+                          } catch (e: any) { notify(e.message, 'error') }
                           setActionLoading(null)
                         }}
                         disabled={actionLoading === account.id}
@@ -575,6 +823,64 @@ export default function SocialsPage() {
                         {actionLoading === account.id ? '...' : 'Sync Profile'}
                       </button>
                     )}
+                    {['fanvue', 'twitter'].includes(account.platform) && (
+                      connectId === account.id ? (
+                        <input
+                          autoFocus
+                          placeholder="Paste API token…"
+                          value={connectToken}
+                          onChange={e => setConnectToken(e.target.value)}
+                          onKeyDown={async e => {
+                            if (e.key === 'Enter' && connectToken.trim().length >= 8) {
+                              setActionLoading(account.id)
+                              try {
+                                const r: any = await connectSocialApi(account.platform, account.username, connectToken.trim())
+                                notify(r.connected
+                                  ? `${account.platform} API connected and validated`
+                                  : `Token stored but NOT connected: ${r.validation?.detail || 'validation failed'}`, r.connected ? 'success' : 'error')
+                                setConnectId(null); setConnectToken('')
+                                refresh()
+                              } catch (e: any) { notify(e.message, 'error') }
+                              setActionLoading(null)
+                            }
+                            if (e.key === 'Escape') { setConnectId(null); setConnectToken('') }
+                          }}
+                          style={{
+                            padding: '6px 10px', borderRadius: 6, fontSize: 12, width: 220,
+                            background: 'var(--bg-card)', color: 'var(--text)', border: '1px solid var(--border)', outline: 'none',
+                          }}
+                        />
+                      ) : (
+                        <button
+                          onClick={() => { setConnectId(account.id); setConnectToken('') }}
+                          style={{
+                            padding: '6px 12px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                            background: 'rgba(34,197,94,0.12)', color: '#22C55E', border: 'none',
+                          }}
+                        >
+                          {account.api_connected ? '🔁 Reconnect API' : '🔑 Connect API'}
+                        </button>
+                      )
+                    )}
+                    {account.api_connected && (
+                      <button
+                        onClick={async () => {
+                          setActionLoading(account.id)
+                          try {
+                            await disconnectSocialApi(account.id)
+                            notify('API credential removed')
+                            refresh()
+                          } catch (e: any) { notify(e.message, 'error') }
+                          setActionLoading(null)
+                        }}
+                        style={{
+                          padding: '6px 12px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                          background: 'rgba(239,68,68,0.10)', color: '#EF4444', border: 'none',
+                        }}
+                      >
+                        Disconnect
+                      </button>
+                    )}
                   </div>
                 </div>
               )
@@ -582,6 +888,7 @@ export default function SocialsPage() {
           </div>
         )}
       </div>
+      <Toast toast={toast} onDismiss={() => setToast(null)} />
     </main>
   )
 }

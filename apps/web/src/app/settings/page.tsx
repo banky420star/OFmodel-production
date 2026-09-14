@@ -17,14 +17,24 @@ export default function SettingsPage() {
 
   const providers = [
     { name: 'LLM', key: 'llm', description: 'Ollama — local language model for identity generation, shoot planning, QA' },
-    { name: 'Image', key: 'image', description: 'HuggingFace Inference API — FLUX.1-schnell for image generation' },
+    { name: 'Image', key: 'image', description: 'Cloud image generation — provider selected by configured API key' },
     { name: 'Video', key: 'video', description: 'DashScope Wan — Alibaba Cloud video generation' },
     { name: 'Voice', key: 'voice', description: 'ElevenLabs — voice synthesis and voice profile creation' },
-    { name: 'Trainer', key: 'trainer', description: 'LoRA model training (mock — requires GPU worker)' },
+    { name: 'Trainer', key: 'trainer', description: 'LoRA model training — local MPS/CUDA via HuggingFace trainer' },
     { name: 'Storage', key: 'storage', description: 'Local filesystem — files saved to hard drive' },
   ]
 
   const checks = summary?.health.checks || []
+
+  const statusMeta = (status: string) => {
+    switch (status) {
+      case 'green': return { dot: 'var(--green)', text: 'var(--green)', label: 'Online' }
+      case 'yellow': return { dot: '#fbbf24', text: '#fbbf24', label: 'Degraded' }
+      case 'mock': return { dot: '#8b5cf6', text: '#8b5cf6', label: 'Mock (dev)' }
+      case 'red': return { dot: '#ef4444', text: '#ef4444', label: 'Failing' }
+      default: return { dot: '#9ca3af', text: '#9ca3af', label: 'Unknown' }
+    }
+  }
 
   return (
     <main className="workspace">
@@ -49,11 +59,12 @@ export default function SettingsPage() {
               {providers.map(p => {
                 const check = checks.find(c => c.service === p.key)
                 const status = check?.status || 'unknown'
+                const meta = statusMeta(status)
                 return (
                   <div key={p.key} className="panel" style={{ padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 16 }}>
                     <span style={{
                       width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
-                      background: status === 'green' ? 'var(--green)' : status === 'yellow' ? '#fbbf24' : '#ef4444',
+                      background: meta.dot,
                     }} />
                     <div style={{ flex: 1 }}>
                       <div style={{ fontWeight: 600, fontSize: 13 }}>{p.name}</div>
@@ -61,9 +72,9 @@ export default function SettingsPage() {
                     </div>
                     <span style={{
                       fontSize: 11, fontWeight: 600, textTransform: 'uppercase',
-                      color: status === 'green' ? 'var(--green)' : status === 'yellow' ? '#fbbf24' : '#ef4444',
+                      color: meta.text,
                     }}>
-                      {status === 'green' ? 'Online' : status === 'yellow' ? 'Degraded' : 'Offline'}
+                      {meta.label}
                     </span>
                   </div>
                 )

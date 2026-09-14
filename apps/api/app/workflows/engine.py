@@ -219,6 +219,17 @@ class WorkflowEngine:
                     if key.startswith("step_"):
                         outputs[key] = val
                 workflow.output_data = outputs
+
+            # Persona status must follow the build workflow truthfully: a failed
+            # build must never leave its persona stuck in BUILDING. (Success does
+            # NOT set anything here — the flow's own activate step manages
+            # READY/active based on QA outcomes.)
+            if failed and workflow.persona_id:
+                from app.models import Persona, PersonaStatus
+                persona = await db.get(Persona, workflow.persona_id)
+                if persona is not None and persona.status == PersonaStatus.BUILDING:
+                    persona.status = PersonaStatus.FAILED
+
             await db.commit()
             await db.refresh(workflow)
 

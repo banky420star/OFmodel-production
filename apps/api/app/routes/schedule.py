@@ -22,17 +22,24 @@ from app.schemas import ScheduledPostResponse
 
 router = APIRouter()
 
+def _persona_uuid(persona_id: str) -> UUID:
+    """Coerce a path param to UUID — Persona.id is a PG-UUID column and a
+    dashed string crashes the type's bind processor."""
+    return UUID(persona_id)
+
+
 @router.get("/personas/{persona_id}/schedule", response_model=list[ScheduledPostResponse])
 async def get_schedule(persona_id: str, db: AsyncSession = Depends(get_db)):
+    pid = _persona_uuid(persona_id)
     result = await db.execute(
-        select(ScheduledPost).where(ScheduledPost.persona_id == persona_id).order_by(ScheduledPost.scheduled_at)
+        select(ScheduledPost).where(ScheduledPost.persona_id == pid).order_by(ScheduledPost.scheduled_at)
     )
     return result.scalars().all()
 
 
 @router.post("/personas/{persona_id}/schedule/generate")
 async def generate_schedule(persona_id: str, db: AsyncSession = Depends(get_db)):
-    persona = await db.get(Persona, persona_id)
+    persona = await db.get(Persona, _persona_uuid(persona_id))
     if not persona:
         raise HTTPException(404, "Persona not found")
 
@@ -45,7 +52,7 @@ async def generate_schedule(persona_id: str, db: AsyncSession = Depends(get_db))
         if date.weekday() < 5:  # Weekdays only
             for platform in random.sample(platforms, k=min(2, len(platforms))):
                 post = ScheduledPost(
-                    id=uuid4(),
+                    id=str(uuid4()),
                     persona_id=persona_id,
                     platform=platform,
                     scheduled_at=date.replace(hour=random.choice([9, 12, 15, 18]), minute=0),
@@ -68,13 +75,14 @@ async def smart_schedule(persona_id: str, db: AsyncSession = Depends(get_db)):
     - OnlyFans: 10am, 2pm, 8pm (mixed, premium at 8pm)
     - Twitter/X: 8am, 12pm, 5pm (text + image)
     """
-    persona = await db.get(Persona, persona_id)
+    pid = _persona_uuid(persona_id)
+    persona = await db.get(Persona, pid)
     if not persona:
         raise HTTPException(404, "Persona not found")
     
     # Get all content packs for this persona that have content
     packs_result = await db.execute(
-        select(ContentPack).where(ContentPack.persona_id == persona_id)
+        select(ContentPack).where(ContentPack.persona_id == pid)
     )
     packs = packs_result.scalars().all()
     
@@ -107,7 +115,7 @@ async def smart_schedule(persona_id: str, db: AsyncSession = Depends(get_db)):
     # Shoot dirs use 8-char truncated UUIDs: storage/shoots/{8char}/
     shoot_dirs = list(Path("storage/shoots").iterdir()) if Path("storage/shoots").exists() else []
     # Build a map: 8-char prefix -> full shoot object
-    shoots_result = await db.execute(select(Shoot).where(Shoot.persona_id == persona_id))
+    shoots_result = await db.execute(select(Shoot).where(Shoot.persona_id == pid))
     shoots = shoots_result.scalars().all()
     shoot_map = {str(s.id)[:8]: s for s in shoots}
     
@@ -155,7 +163,7 @@ async def smart_schedule(persona_id: str, db: AsyncSession = Depends(get_db)):
     from app.models import SocialAccount
     socials_result = await db.execute(
         select(SocialAccount).where(
-            SocialAccount.persona_id == str(persona_id),
+            SocialAccount.persona_id == str(pid),
             SocialAccount.status.in_(['active', 'approved'])
         )
     )

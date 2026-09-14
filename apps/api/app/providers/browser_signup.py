@@ -10,6 +10,7 @@ import logging
 import random
 import string
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,7 @@ class SignupResult:
     message: str
     screenshot_path: str = ""
     session_cookies: list = field(default_factory=list)
+    profile_url: str = ""
 
 
 def _random_name() -> str:
@@ -53,6 +55,7 @@ async def signup_instagram(
     *,
     headless: bool = True,
     timeout_ms: int = 30000,
+    email_token: str = "",
 ) -> SignupResult:
     """
     Automate Instagram account signup.
@@ -200,6 +203,16 @@ async def signup_instagram(
             # Take screenshot after submission
             screenshot_path = f"/tmp/ig_signup_3_{username}.png"
             await page.screenshot(path=screenshot_path)
+
+            # Email-code wall: complete verification IN THIS SESSION (single-session flow).
+            # Poll mail.tm for the code and enter it before anything closes the browser.
+            if email_token:
+                body_text = (await page.inner_text("body")).lower()
+                if "confirmation code" in body_text or "enter the code" in body_text or "code we sent" in body_text:
+                    result = await _complete_email_verification(page, context, email_token, username)
+                    result.email = email
+                    await browser.close()
+                    return result
 
             # Check for CAPTCHA
             captcha = page.locator('iframe[src*="captcha"], .captcha, [data-testid="captcha"], div:has-text("Suspicious activity")')
@@ -915,6 +928,389 @@ SIGNUP_HANDLERS = {
 }
 
 
+def _extract_6digit(text: str):
+    """Pull the 6-digit code out of an Instagram verification email subject/body."""
+    import re
+    m = re.search(r"\b(\d{6})\b", text or "")
+    return m.group(1) if m else None
+
+
+async def _complete_email_verification(page, context, email_token: str, username: str) -> SignupResult:
+    """Complete signup IN THE LIVE SESSION: poll mail.tm for the 6-digit code,
+    type it into the still-open confirmation page, and land in the logged-in app.
+    The browser must NOT close between submit and code entry — Instagram's signup
+    session does not survive a restart."""
+    import asyncio
+    from app.providers.email import fetch_emails, fetch_email_detail
+
+    code = None
+    deadline = asyncio.get_event_loop().time() + 90  # mail.tm delivery is usually <60s
+    while asyncio.get_event_loop().time() < deadline and not code:
+        try:
+            emails = await fetch_emails(email_token)
+            for e in emails:
+                subject = e.get("subject", "")
+                if "instagram" in subject.lower() and "code" in subject.lower():
+                    code = _extract_6digit(subject)
+                    if not code:
+                        detail = await fetch_email_detail(email_token, e["id"])
+                        body = detail.get("text") or ""
+                        if isinstance(detail.get("html"), list):
+                            body += " " + " ".join(detail["html"])
+                        code = _extract_6digit(body)
+                    if code:
+                        break
+        except Exception as exc:
+            logger.warning(f"mail.tm poll failed: {exc}")
+        if not code:
+            await asyncio.sleep(5)
+
+    if not code:
+        await page.screenshot(path=f"/tmp/ig_verify_notime_{username}.png")
+        return SignupResult(
+            success=False, platform="instagram", username=username, email="",
+            status="error",
+            message="No verification code arrived within 90s — check the inbox manually",
+            screenshot_path=f"/tmp/ig_verify_notime_{username}.png",
+            session_cookies=await context.cookies(),
+        )
+
+    logger.info(f"Got verification code for @{username}, entering it")
+
+    # Instagram's code field is a custom overlay: the real input stays hidden until the
+    # visible field area is clicked. fill() on the hidden input times out — click, then type.
+    filled = False
+    try:
+        label = page.locator('div:has-text("Confirmation code")').last
+        await label.click(timeout=5000)
+        await asyncio.sleep(1)
+        await page.keyboard.type(code, delay=120)
+        filled = True
+    except Exception as e:
+        logger.warning(f"click-then-type failed ({str(e)[:60]}), trying direct selectors")
+        for sel in ['input[name="confirmation_code"]', 'input[inputmode="numeric"]',
+                    'input[autocomplete*="one-time"]', 'input[type="tel"]']:
+            loc = page.locator(sel)
+            if await loc.count() > 0:
+                try:
+                    await loc.first.fill(code, timeout=5000)
+                    filled = True
+                    break
+                except Exception:
+                    continue
+    if not filled:
+        await page.screenshot(path=f"/tmp/ig_verify_noinput_{username}.png")
+        return SignupResult(
+            success=False, platform="instagram", username=username, email="",
+            status="error",
+            message="Code arrived but could not be entered — field never became editable",
+            screenshot_path=f"/tmp/ig_verify_noinput_{username}.png",
+            session_cookies=await context.cookies(),
+        )
+
+    await page.screenshot(path=f"/tmp/ig_verify_filled_{username}.png")
+
+    # Submit — div[role=button] on current builds, button otherwise
+    clicked = False
+    for sel in ['div[role="button"]:has-text("Next")', 'div[role="button"]:has-text("Continue")',
+                'button:has-text("Next")', 'button:has-text("Continue")', 'button[type="submit"]']:
+        loc = page.locator(sel)
+        if await loc.count() > 0:
+            await loc.first.click()
+            clicked = True
+            break
+    if not clicked:
+        await page.keyboard.press("Enter")
+
+    # Give Instagram time to provision the account and land us in the app
+    for _ in range(8):
+        await asyncio.sleep(3)
+        cookies = {c["name"] for c in await context.cookies()}
+        if "sessionid" in cookies:
+            break
+
+    cookies = await context.cookies()
+    logged_in = any(c["name"] == "sessionid" for c in cookies)
+    final_url = page.url
+    screenshot_path = f"/tmp/ig_verify_done_{username}.png"
+    await page.screenshot(path=screenshot_path)
+
+    if logged_in:
+        profile_url = f"https://www.instagram.com/{username}/"
+        # Confirm the profile resolves in-session (404 would mean account not visible yet)
+        try:
+            resp = await page.goto(profile_url, wait_until="domcontentloaded", timeout=20000)
+            await asyncio.sleep(3)
+            body = (await page.inner_text("body"))[:600].lower()
+            if "sorry, this page isn" in body or "page isn" in body:
+                profile_url = ""  # not public yet — account exists but profile not up
+            await page.screenshot(path=screenshot_path)
+        except Exception:
+            pass
+        return SignupResult(
+            success=True, platform="instagram", username=username, email="",
+            status="completed",
+            message="Email verified — logged in as a real account",
+            screenshot_path=screenshot_path,
+            session_cookies=cookies,
+            profile_url=profile_url,
+        )
+
+    return SignupResult(
+        success=False, platform="instagram", username=username, email="",
+        status="verification_needed",
+        message=f"Code entered but no sessionid cookie landed — landed on {final_url}",
+        screenshot_path=screenshot_path,
+        session_cookies=cookies,
+    )
+
+
+async def assisted_signup_instagram(
+    email: str,
+    password: str,
+    display_name: str,
+    username: str,
+    *,
+    timeout_ms: int = 45000,
+    wait_minutes: float = 15.0,
+    poll_seconds: float = 3.0,
+) -> SignupResult:
+    """Operator-assisted signup: robot fills, human finishes.
+
+    Opens a VISIBLE Chromium window, fills the Instagram signup form (email,
+    password, birthday, name, username) and clicks Submit — then STOPS. The
+    operator personally solves whatever Instagram presents in that same
+    session: the 6-digit email code, CAPTCHA, or a phone check. The robot
+    watches the page and resumes automatically the moment the operator's
+    work lands an authenticated session (sessionid cookie).
+
+    The window stays open and owned by the assistant for the whole wait, so
+    every check happens in one warm browser — the single-session property
+    that makes the difference versus headless runs.
+    """
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        return SignupResult(
+            success=False, platform="instagram", username=username, email=email,
+            status="error",
+            message="Playwright not installed. Run: pip install playwright && playwright install chromium",
+        )
+
+    logger.info(f"ASSISTED Instagram signup for @{username} ({email}) — visible window, operator solves challenges")
+    proof_dir = Path("storage/signup_proofs") / username
+    proof_dir.mkdir(parents=True, exist_ok=True)
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=False,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--window-size=1280,900",
+            ],
+        )
+        context = await browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1280, "height": 860},
+            locale="en-US",
+            timezone_id="America/New_York",
+        )
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            delete navigator.__proto__.webdriver;
+        """)
+
+        page = await context.new_page()
+
+        try:
+            await page.goto(
+                "https://www.instagram.com/accounts/emailsignup/",
+                wait_until="domcontentloaded",
+                timeout=timeout_ms,
+            )
+            await asyncio.sleep(3)
+
+            # Cookie/consent dialogs
+            try:
+                accept = page.locator("button:has-text('Allow'), button:has-text('Accept'), button:has-text('Allow all cookies')")
+                if await accept.count() > 0:
+                    await accept.first.click()
+                    await asyncio.sleep(1.5)
+            except Exception:
+                pass
+
+            text_inputs = page.locator('input[type="text"]')
+            if await text_inputs.count() >= 1:
+                await text_inputs.nth(0).fill(email)
+                await asyncio.sleep(0.4)
+            password_input = page.locator('input[type="password"]')
+            if await password_input.count() > 0:
+                await password_input.first.fill(password)
+                await asyncio.sleep(0.4)
+
+            months = ['January','February','March','April','May','June',
+                      'July','August','September','October','November','December']
+            month = random.choice(months)
+            day = str(random.randint(1, 28))
+            year = str(random.randint(1995, 2000))
+            try:
+                await page.locator('[role="combobox"]:has-text("Month")').click()
+                await asyncio.sleep(0.5)
+                await page.get_by_role("option", name=month).click()
+                await asyncio.sleep(0.3)
+                await page.locator('[role="combobox"]:has-text("Day")').click()
+                await asyncio.sleep(0.5)
+                await page.get_by_role("option", name=day, exact=True).click()
+                await asyncio.sleep(0.3)
+                await page.locator('[role="combobox"]:has-text("Year")').click()
+                await asyncio.sleep(0.5)
+                await page.get_by_role("option", name=year, exact=True).click()
+                await asyncio.sleep(0.3)
+            except Exception as e:
+                logger.warning(f"Birthday selection failed: {e}")
+
+            if await text_inputs.count() >= 2:
+                await text_inputs.nth(1).fill(display_name)
+                await asyncio.sleep(0.4)
+            username_input = page.locator('input[aria-label="Username"]')
+            if await username_input.count() > 0:
+                await username_input.fill(username)
+                await asyncio.sleep(1)
+
+            shot1 = str(proof_dir / "assisted_1_form_filled.png")
+            await page.screenshot(path=shot1)
+
+            submit = page.get_by_role("button", name="Submit")
+            if await submit.count() > 0:
+                await submit.click()
+            else:
+                signup_btn = page.locator('button[type="submit"]')
+                if await signup_btn.count() > 0:
+                    await signup_btn.first.click()
+                else:
+                    await page.keyboard.press("Enter")
+            await asyncio.sleep(4)
+
+            shot2 = str(proof_dir / "assisted_2_after_submit.png")
+            await page.screenshot(path=shot2)
+
+            # ── HAND-OFF POINT ──────────────────────────────────────────
+            # The operator now drives. We only WATCH for success.
+            deadline = asyncio.get_event_loop().time() + wait_minutes * 60
+            last_shot = 0.0
+            logged_in = False
+
+            while asyncio.get_event_loop().time() < deadline:
+                try:
+                    cookies = {c["name"] for c in await context.cookies()}
+                    if "sessionid" in cookies:
+                        logged_in = True
+                        break
+                    url = page.url
+                    if "/accounts/emailsignup" not in url and "/accounts/login" not in url:
+                        body = ""
+                        try:
+                            body = (await page.inner_text("body"))[:1200].lower()
+                        except Exception:
+                            pass
+                        if "suspended" in url or "suspended" in body:
+                            logged_in = True  # session exists — record the bad state below
+                            break
+                except Exception:
+                    pass
+
+                if asyncio.get_event_loop().time() - last_shot > 30:
+                    last_shot = asyncio.get_event_loop().time()
+                    try:
+                        await page.screenshot(path=str(proof_dir / "assisted_3_operator_solving.png"))
+                    except Exception:
+                        pass
+                await asyncio.sleep(poll_seconds)
+
+            shot3 = str(proof_dir / "assisted_4_session_result.png")
+            await page.screenshot(path=shot3)
+            cookies = await context.cookies()
+
+            if not logged_in:
+                await browser.close()
+                return SignupResult(
+                    success=False, platform="instagram", username=username, email=email,
+                    status="error",
+                    message=f"Operator wait window ({wait_minutes:.0f} min) elapsed without an authenticated session — check {proof_dir}",
+                    screenshot_path=shot3,
+                    session_cookies=cookies,
+                )
+
+            # Session exists. If Instagram suspended on creation, say so truthfully.
+            final_url = page.url
+            suspended = "suspended" in final_url
+            if not suspended:
+                try:
+                    body = (await page.inner_text("body"))[:1200].lower()
+                    suspended = "suspended" in body or "account has been disabled" in body
+                except Exception:
+                    pass
+
+            profile_url = f"https://www.instagram.com/{username}/"
+            if not suspended:
+                try:
+                    resp = await page.goto(profile_url, wait_until="domcontentloaded", timeout=25000)
+                    await asyncio.sleep(3)
+                    body = (await page.inner_text("body"))[:600].lower()
+                    if "sorry, this page isn" in body or "page isn" in body or "suspended" in body:
+                        profile_url = ""
+                    await page.screenshot(path=shot3)
+                except Exception:
+                    pass
+
+            await browser.close()
+            if suspended:
+                return SignupResult(
+                    success=True, platform="instagram", username=username, email=email,
+                    status="suspended",
+                    message="Operator session landed, but Instagram flagged/suspended the account — recorded truthfully",
+                    screenshot_path=shot3,
+                    session_cookies=cookies,
+                    profile_url="",
+                )
+            return SignupResult(
+                success=True, platform="instagram", username=username, email=email,
+                status="completed",
+                message="Operator-assisted signup completed — authenticated session captured with full cookie set",
+                screenshot_path=shot3,
+                session_cookies=cookies,
+                profile_url=profile_url,
+            )
+
+        except Exception as e:
+            logger.error(f"ASSISTED Instagram signup error for @{username}: {e}")
+            try:
+                shot3 = str(proof_dir / "assisted_5_error.png")
+                await page.screenshot(path=shot3)
+            except Exception:
+                shot3 = ""
+            cookies = []
+            try:
+                cookies = await context.cookies()
+            except Exception:
+                pass
+            try:
+                await browser.close()
+            except Exception:
+                pass
+            return SignupResult(
+                success=False, platform="instagram", username=username, email=email,
+                status="error", message=f"Error: {str(e)[:200]}",
+                screenshot_path=shot3, session_cookies=cookies,
+            )
+
+
 async def auto_signup(
     platform: str,
     email: str,
@@ -923,9 +1319,12 @@ async def auto_signup(
     username: str,
     *,
     headless: bool = True,
+    email_token: str = "",
 ) -> SignupResult:
     """
     Dispatch signup to the appropriate platform handler.
+    email_token: mail.tm token for the inbox behind `email` — when provided and the
+    platform throws an email-code wall, verification is completed in-session.
     """
     handler = SIGNUP_HANDLERS.get(platform.lower())
     if not handler:
@@ -938,10 +1337,9 @@ async def auto_signup(
             message=f"Unsupported platform: {platform}. Supported: {list(SIGNUP_HANDLERS.keys())}",
         )
 
-    return await handler(
-        email=email,
-        password=password,
-        display_name=display_name,
-        username=username,
-        headless=headless,
-    )
+    import inspect
+    kwargs = dict(email=email, password=password, display_name=display_name,
+                  username=username, headless=headless)
+    if email_token and 'email_token' in inspect.signature(handler).parameters:
+        kwargs['email_token'] = email_token
+    return await handler(**kwargs)

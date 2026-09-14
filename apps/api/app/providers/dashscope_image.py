@@ -67,6 +67,7 @@ class DashScopeImageProvider(ImageProvider):
         seed: int = -1,
         lora_path: str = "",
         lora_strength: float = 0.8,
+        session_id: str = "",
     ) -> ProviderResult:
         start = time.monotonic()
 
@@ -222,7 +223,7 @@ class DashScopeImageProvider(ImageProvider):
         size_str = f"{max(512, min(2048, width))}*{max(512, min(2048, height))}"
 
         payload = {
-            "model": "qwen-image-2.0-pro",
+            "model": "qwen-image-edit",
             "input": {
                 "messages": [
                     {
@@ -282,7 +283,7 @@ class DashScopeImageProvider(ImageProvider):
                                             "height": height,
                                             "prompt": prompt,
                                             "generation_time_ms": int(elapsed_ms),
-                                            "model": "qwen-image-3.0-pro",
+                                            "model": "qwen-image-edit",
                                             "image_size_bytes": len(image_bytes),
                                             "mode": "edit",
                                         },
