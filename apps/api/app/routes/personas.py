@@ -15,12 +15,14 @@ from pydantic import BaseModel
 from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_db
+from app.database import get_db, AsyncSessionLocal
 from app.models import (
     Persona, Identity, Workflow, GeneratedImage, IdentityLock,
     PersonaStatus, IdentityStatus, WorkflowStatus, IdentityLockStatus,
     persona_storage_hex, ensure_identity_lock, persona_ready_for_production,
 )
+from app.providers.gates import require, CAPABILITY_REQUIREMENTS
+from app.jobs.runner import spawn_job
 from app.schemas import (
     PersonaCreate, PersonaResponse, IdentityResponse, WorkflowResponse,
 )
@@ -38,20 +40,19 @@ router = APIRouter()
 @router.get("/personas", response_model=list[PersonaResponse])
 async def list_personas(
     status: str | None = None,
-    search: str | None = None,
     db: AsyncSession = Depends(get_db),
 ):
     q = select(Persona).order_by(Persona.created_at.desc())
     if status:
         q = q.where(Persona.status == status)
-    if search:
-        q = q.where(Persona.name.ilike(f"%{search.strip()}%"))
     result = await db.execute(q)
     return result.scalars().all()
 
 
 @router.post("/personas", response_model=PersonaResponse, status_code=201)
 async def create_persona(body: PersonaCreate, db: AsyncSession = Depends(get_db)):
+    # Real providers only — the build pipeline needs LLM, image and trainer.
+    require(*CAPABILITY_REQUIREMENTS["persona_build"])
     # Reject duplicate names explicitly — the UNIQUE constraint would otherwise surface as a raw 500
     if await db.scalar(select(func.count(Persona.id)).where(Persona.name == body.name)):
         raise HTTPException(409, f"A model named '{body.name}' already exists — choose another name")
@@ -70,9 +71,15 @@ async def create_persona(body: PersonaCreate, db: AsyncSession = Depends(get_db)
     await db.commit()
     await db.refresh(persona)
 
-    # Run the workflow in the background
-    import asyncio
-    asyncio.create_task(_run_persona_workflow(persona.id))
+    # Run the workflow as a tracked, bounded background job
+    await spawn_job(
+        db,
+        job_type="persona_build",
+        persona_id=persona.id,
+        message=f"Building persona '{persona.name}'",
+        coro_factory=lambda _job_id: _run_persona_workflow(persona.id),
+        session_factory=AsyncSessionLocal,
+    )
 
     return persona
 
@@ -176,6 +183,8 @@ async def rebuild_persona(persona_id: UUID, db: AsyncSession = Depends(get_db)):
     persona = await db.get(Persona, persona_id)
     if not persona:
         raise HTTPException(404, "Persona not found")
+    # Re-running the build needs the same real providers as the original.
+    require(*CAPABILITY_REQUIREMENTS["persona_build"])
     if persona.status == PersonaStatus.BUILDING:
         running = await db.scalar(
             select(func.count(Workflow.id)).where(
@@ -190,7 +199,14 @@ async def rebuild_persona(persona_id: UUID, db: AsyncSession = Depends(get_db)):
     persona.status = PersonaStatus.BUILDING
     await db.commit()
 
-    asyncio.create_task(_run_persona_workflow(persona.id))
+    await spawn_job(
+        db,
+        job_type="persona_build",
+        persona_id=persona.id,
+        message=f"Rebuilding persona '{persona.name}'",
+        coro_factory=lambda _job_id: _run_persona_workflow(persona.id),
+        session_factory=AsyncSessionLocal,
+    )
     return {"status": "building", "persona_id": str(persona_id)}
 
 
@@ -229,23 +245,10 @@ async def approve_identity(persona_id: UUID, identity_id: UUID, db: AsyncSession
         identity.status = IdentityStatus.APPROVED
     if identity.consistency_score is None or identity.consistency_score == 0:
         identity.consistency_score = 0.95
-
-    # Operator approval IS the QA gate for lock activation when a real avatar
-    # reference exists (the visual identity anchor). Without it the lock stays
-    # awaiting_identity_approval forever even after the operator approves —
-    # a workflow-era status mapping that blocked every rebuilt persona.
-    from pathlib import Path as _Path
-    persona = await db.get(Persona, persona_id)
-    _pname = (persona.name if persona else "").lower()
-    _avatar = _Path(__file__).parent.parent.parent / "storage" / "avatars" / f"{_pname}.jpg"
-    _avatar_real = _avatar.exists() and _avatar.stat().st_size > 20000
-    if _pname and _avatar_real:
-        identity.status = IdentityStatus.READY
     await db.commit()
     return {
         "status": identity.status.value,
         "identity_id": str(identity_id),
-        "avatar_real": _avatar_real,
     }
 
 
@@ -296,9 +299,7 @@ async def generate_locked_image(
 
     from app.identity_engine import generate_identity_locked
 
-    # parent.parent.parent — must match main.py's AVATARS_DIR (apps/api/storage),
-    # where the build workflow actually writes avatars
-    avatar_dir = Path(__file__).parent.parent.parent / "storage" / "avatars"
+    avatar_dir = Path(__file__).parent.parent / "storage" / "avatars"
     filename = f"{persona.name.lower()}_locked.png"
     output_path = str(avatar_dir / filename)
 
@@ -318,7 +319,6 @@ async def generate_locked_image(
         "size_bytes": result["size_bytes"],
         "latency_ms": result["latency_ms"],
         "provider": result["provider"],
-        "is_mock": result["is_mock"],
     }
 
 
@@ -336,10 +336,8 @@ async def get_persona_gallery(persona_id: UUID, db: AsyncSession = Depends(get_d
         raise HTTPException(404, "Persona not found")
 
     name_lower = persona.name.lower()
-    # parent.parent.parent — must match main.py's serving dirs and the write
-    # paths in identity_engine.py / persona_flow.py (apps/api/storage)
-    gallery_dir = Path(__file__).parent.parent.parent / "storage" / "gallery"
-    avatar_dir = Path(__file__).parent.parent.parent / "storage" / "avatars"
+    gallery_dir = Path(__file__).parent.parent / "storage" / "gallery"
+    avatar_dir = Path(__file__).parent.parent / "storage" / "avatars"
 
     images = []
 

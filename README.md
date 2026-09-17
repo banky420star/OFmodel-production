@@ -1,131 +1,97 @@
-# Persona Studio
+# Persona Production Line
 
-Local/cloud hybrid platform for creating and operating persistent fictional synthetic creator identities.
+Synthetic-persona content production line — the Persona Studio architecture, rebuilt to run **real providers only**. There is no mock/demo mode: every capability is explicitly configured, and any endpoint whose provider is unconfigured fails with a 503 naming the exact env var to set.
 
-## Quick Start
+## Stack
+
+- **API** — FastAPI + SQLAlchemy async (SQLite dev / Postgres prod), durable workflow engine, single job runner with concurrency + timeout limits.
+- **Web** — Next.js 15 App Router, dark design system in plain CSS.
+- **Providers** (all real, one per capability, chosen in `.env`):
+  - LLM: Ollama (local)
+  - Image: DashScope qwen-image / qwen-image-edit (default), EachSense, ComfyUI, HuggingFace
+  - Video: DashScope Wan (cloud) or self-hosted Wan server
+  - Voice: ElevenLabs
+  - Trainer: local LoRA (diffusers + peft, MPS/CUDA)
+  - Moderation: HuggingFace NSFW classifier (fail-closed — unavailable moderation blocks generation)
+  - Storage: local filesystem or MinIO
+  - Analytics: real Instagram Graph sync + manual entry (no synthetic data)
+  - Creator business: monetization workspace with offer-ladder planning, recorded-vs-projected revenue separation, and launch gates for disclosure, rights, human review, and provider health.
+
+## Layout
+
+```
+apps/api     FastAPI backend (app/, tests/, alembic/)
+apps/web     Next.js frontend (src/)
+scripts      launchd plists, init.sql, provider e2e tests
+storage      runtime media (git-ignored): avatars/, gallery/, shoots/, videos/, datasets/
+```
+
+## Run (local)
 
 ```bash
-# Clone and start
-docker compose up --build
-
-# API docs
-open http://localhost:8000/docs
-
-# Frontend
-open http://localhost:3000
+cp .env.example .env        # fill in real keys
+cd apps/api && python3 -m venv .venv && .venv/bin/pip install -e . && .venv/bin/python -m uvicorn app.main:app --port 8000
+cd apps/web && npm install && npm run dev
 ```
 
-## Architecture
+API docs: http://localhost:8000/docs — Web: http://localhost:3000
 
-```
-Persona Studio
-    │
-  Next.js (3000)
-    │
-  FastAPI (8000)
-    │
-  Workflow Orchestrator
-    │
-    ├── Mock Providers (development)
-    │   ├── MockImageProvider
-    │   ├── MockVideoProvider
-    │   ├── MockVoiceProvider
-    │   └── MockTrainerProvider
-    │
-    └── Real Providers (production)
-        ├── ComfyUIImageProvider
-        ├── WanVideoProvider
-        ├── ElevenLabsVoiceProvider
-        └── LoRATrainer
-    │
-  PostgreSQL → Redis → MinIO
-```
+## Creator monetization workspace
 
-## Features
+Open **Monetization** in the web app for a platform-neutral subscription
+planning view. It uses recorded analytics when available and labels scenario
+math as planning only; it does not invent revenue or subscriber data. For
+platforms without an official API, publishing, verification, and account
+actions remain manual and human-approved.
 
-- **Persona Creation**: Define appearance, personality, brand
-- **Identity Pipeline**: Generate candidates → approve → reference dataset → train → validate
-- **Shoot Director**: Plan and generate photo/video shoots
-- **Content Packs**: Assemble images, video, voiceover, captions
-- **QA Engine**: Automated identity consistency and quality checks
-- **Analytics**: 90-day performance tracking
-- **24-Month Forecast**: Conservative/Base/Aggressive scenarios
-- **Content Calendar**: Auto-scheduling across platforms
-- **Autopilot**: OFF / ASSISTED / ON modes
-- **Durable Workflows**: Resumable state machine, survives restarts
+## ComfyUI
 
-## API Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/v1/health` | GET | System health check |
-| `/api/v1/personas` | GET/POST | List/create personas |
-| `/api/v1/personas/{id}` | GET | Get persona detail |
-| `/api/v1/personas/{id}/identities` | GET | List identity candidates |
-| `/api/v1/personas/{id}/identities/{id}/approve` | POST | Approve identity |
-| `/api/v1/personas/{id}/shoots` | GET/POST | List/create shoots |
-| `/api/v1/shoots/{id}/generate` | POST | Generate shoot content |
-| `/api/v1/personas/{id}/packs` | GET/POST | List/create content packs |
-| `/api/v1/packs/{id}/assemble` | POST | Assemble full pack |
-| `/api/v1/workflows` | GET | List workflows |
-| `/api/v1/workflows/{id}` | GET | Get workflow detail |
-| `/api/v1/workflows/{id}/steps` | GET | Get workflow steps |
-| `/api/v1/workflows/{id}/retry` | POST | Retry failed workflow |
-| `/api/v1/personas/{id}/qa` | GET | QA results |
-| `/api/v1/personas/{id}/analytics` | GET | Analytics data |
-| `/api/v1/personas/{id}/analytics/generate` | POST | Generate mock analytics |
-| `/api/v1/personas/{id}/forecasts` | GET | Forecast data |
-| `/api/v1/personas/{id}/forecasts/generate` | POST | Generate 24-month forecast |
-| `/api/v1/personas/{id}/schedule` | GET | Content calendar |
-| `/api/v1/personas/{id}/schedule/generate` | POST | Auto-schedule |
-| `/api/v1/personas/{id}/autopilot` | POST | Toggle autopilot mode |
-
-## Running Tests
+ComfyUI is already supported as the image provider. Start ComfyUI separately,
+then set:
 
 ```bash
-# API unit + integration tests
-cd apps/api
-pip install -e ".[dev]"
-pytest -v
-
-# Playwright E2E tests
-cd apps/web
-npm install
-npx playwright install
-npx playwright test
+IMAGE_PROVIDER=comfyui
+COMFYUI_URL=http://127.0.0.1:8188
+COMFYUI_CHECKPOINT=sd_xl_base_1.0.safetensors
 ```
 
-## Development
+For a local Apple Silicon setup, the project includes launchers for the
+complete development stack:
 
 ```bash
-# Start infrastructure only
-docker compose up postgres redis minio
-
-# Run API locally
-cd apps/api
-uvicorn app.main:app --reload
-
-# Run frontend locally
-cd apps/web
-npm run dev
+./scripts/start_comfyui.sh   # ComfyUI on MPS at :8188
+./scripts/start_local.sh     # API on :8000 and web UI on :3000
 ```
 
-## Provider Configuration
+`start_comfyui.sh` uses the M4/MPS device by default; set `COMFYUI_CPU=1`
+when a CPU-only run is required. The ComfyUI checkpoint still must be
+installed locally under `.local/ComfyUI/models/checkpoints` before queuing a
+generation. The app will show ComfyUI as reachable even before a checkpoint
+is installed, but generation remains blocked by ComfyUI until a checkpoint is
+available.
 
-All providers start as **mocks**. To connect real providers:
+Run the preflight before generating:
 
-| Provider | Environment Variable | Required |
-|----------|---------------------|----------|
-| ComfyUI | `COMFYUI_URL` | Real image gen |
-| Wan Video | `WAN_VIDEO_URL` | Real video gen |
-| ElevenLabs | `ELEVENLABS_API_KEY` | Real voice |
-| Ollama | `OLLAMA_BASE_URL` | Local LLM |
-| GPU Worker | `GPU_WORKER_URL` | Remote GPU |
+```bash
+python3 scripts/check_comfyui.py --url http://127.0.0.1:8188
+```
 
-## Safety Requirements
+The check verifies the API, GPU/device response, and the nodes required for
+identity-locked txt2img/img2img (`CheckpointLoaderSimple`, `KSampler`,
+`LoadImage`, `VAEEncode`, and `SaveImage`). Install a checkpoint such as
+`sd_xl_base_1.0.safetensors` in ComfyUI's `models/checkpoints` directory before
+starting a production run.
 
-- Adult verification required for all personas
-- Synthetic identities only — no real person data
-- Training data requires explicit rights documentation
-- Human approval for canonical identity
-- No API keys in frontend code
+The identity engine still requires an active identity lock, a consented
+reference, and provider-backed QA before media can be used in a pack.
+
+## Run (docker)
+
+```bash
+cp .env.example .env
+docker compose up --build   # postgres + api(8000) + web(3000)
+```
+
+## The identity lock
+
+Every image goes through the identity engine, which requires an ACTIVE `identity_locks` row (created at persona build; flips ACTIVE only when the identity passes QA) and the persona's real avatar as the edit reference. No lock → no generation. This is what keeps the face consistent and what keeps placeholders out of the pipeline.

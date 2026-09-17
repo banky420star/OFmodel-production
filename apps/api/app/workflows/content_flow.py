@@ -109,7 +109,7 @@ async def generate_shoot_images_handler(
                 image_key=result.data.get("image_key", ""),
                 seed=result.data.get("seed", 0),
                 generation_time_ms=result.data.get("generation_time_ms", 0),
-                metadata_json={"shoot_id": shoot_id, "shot_index": i, "is_mock": True},
+                metadata_json={"shoot_id": shoot_id, "shot_index": i, "provider": result.provider},
             )
             db.add(gen_img)
             generated.append(str(gen_img.id))
@@ -148,7 +148,7 @@ async def generate_shoot_videos_handler(
                 duration_seconds=result.data.get("duration", 4.0),
                 fps=result.data.get("fps", 24),
                 generation_time_ms=result.data.get("generation_time_ms", 0),
-                metadata_json={"shoot_id": shoot_id, "is_mock": True},
+                metadata_json={"shoot_id": shoot_id, "provider": result.provider},
             )
             db.add(vid)
             generated.append(str(vid.id))
@@ -191,7 +191,7 @@ async def generate_voiceover_handler(
                 voice_id=voice_id,
                 duration_seconds=synth.data.get("duration_seconds", 0),
                 generation_time_ms=synth.data.get("generation_time_ms", 0),
-                metadata_json={"is_mock": True},
+                metadata_json={"provider": synth.provider},
             )
             db.add(v)
             generated.append(str(v.id))

@@ -102,31 +102,20 @@ async def test_create_and_assemble_content_pack(client):
 
 
 @pytest.mark.asyncio
-async def test_generate_analytics(client):
+async def test_demo_generate_endpoints_removed(client):
+    """The synthetic analytics/forecast generators were deleted (de-demo).
+
+    Real data comes from Instagram sync or manual entry — a call to a
+    synthetic generator must 404, never fabricate numbers.
+    """
     create_resp = await client.post("/api/v1/personas", json={
         "name": _uniq("Zara"), "age": 24, "adult_verified": True, "synthetic_identity": True,
     })
     persona_id = create_resp.json()["id"]
     resp = await client.post(f"/api/v1/personas/{persona_id}/analytics/generate")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["status"] == "generated"
-    assert data["days"] == 90
-
-
-@pytest.mark.asyncio
-async def test_generate_forecast(client):
-    create_resp = await client.post("/api/v1/personas", json={
-        "name": _uniq("Maya"), "age": 25, "adult_verified": True, "synthetic_identity": True,
-    })
-    persona_id = create_resp.json()["id"]
-    # Generate analytics first (needed for forecast base)
-    await client.post(f"/api/v1/personas/{persona_id}/analytics/generate")
+    assert resp.status_code == 404
     resp = await client.post(f"/api/v1/personas/{persona_id}/forecasts/generate")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["horizon_months"] == 24
-    assert len(data["scenarios"]) > 0
+    assert resp.status_code == 404
 
 
 @pytest.mark.asyncio

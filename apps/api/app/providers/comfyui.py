@@ -15,11 +15,13 @@ import json
 import random
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
 import httpx
 import structlog
 
+from app.config import get_settings
 from app.providers.base import ImageProvider, ProviderResult
 
 logger = structlog.get_logger()
@@ -99,6 +101,25 @@ class ComfyUIImageProvider(ImageProvider):
             self._client = httpx.AsyncClient(base_url=self._base_url, timeout=self._timeout)
         return self._client
 
+    async def _checkpoint_name(self, client: httpx.AsyncClient) -> str:
+        response = await client.get("/object_info")
+        response.raise_for_status()
+        names = (
+            response.json()
+            .get("CheckpointLoaderSimple", {})
+            .get("input", {})
+            .get("required", {})
+            .get("ckpt_name", [[], {}])[0]
+        )
+        expected = get_settings().COMFYUI_CHECKPOINT
+        if expected not in names:
+            raise RuntimeError(
+                f"ComfyUI checkpoint {expected!r} is not installed. Add that compatible "
+                "model under .local/ComfyUI/models/checkpoints or set COMFYUI_CHECKPOINT "
+                "to the exact installed checkpoint filename."
+            )
+        return expected
+
     async def generate(
         self,
         prompt: str,
@@ -118,6 +139,7 @@ class ComfyUIImageProvider(ImageProvider):
         start = time.monotonic()
         try:
             client = await self._get_client()
+            checkpoint = await self._checkpoint_name(client)
 
             # Build workflow
             workflow = json.loads(json.dumps(DEFAULT_TXT2IMG_WORKFLOW))
@@ -128,6 +150,7 @@ class ComfyUIImageProvider(ImageProvider):
             workflow["5"]["inputs"]["height"] = height
             workflow["6"]["inputs"]["text"] = prompt
             workflow["7"]["inputs"]["text"] = negative_prompt or "bad quality, blurry"
+            workflow["4"]["inputs"]["ckpt_name"] = checkpoint
 
             # Inject LoRA if provided
             if lora_path:
@@ -154,9 +177,21 @@ class ComfyUIImageProvider(ImageProvider):
             elapsed_ms = (time.monotonic() - start) * 1000
 
             if result:
+                # Fetch the rendered bytes so generate() honors the same
+                # contract as edit_image (and DashScope): data["image_bytes"].
+                img_resp = await client.get(
+                    "/view",
+                    params={
+                        "filename": result["filename"],
+                        "subfolder": result.get("subfolder", ""),
+                        "type": "output",
+                    },
+                )
+                img_resp.raise_for_status()
                 return ProviderResult(
                     success=True,
                     data={
+                        "image_bytes": img_resp.content,
                         "image_key": result["filename"],
                         "image_url": f"{self._base_url}/view?filename={result['filename']}&subfolder={result.get('subfolder', '')}&type=output",
                         "seed": seed,
@@ -202,6 +237,7 @@ class ComfyUIImageProvider(ImageProvider):
     async def _wait_for_completion(self, prompt_id: str) -> dict | None:
         """Poll ComfyUI /history endpoint until prompt completes."""
         client = await self._get_client()
+        checkpoint = await self._checkpoint_name(client)
         deadline = time.monotonic() + self._timeout
 
         while time.monotonic() < deadline:
@@ -220,6 +256,75 @@ class ComfyUIImageProvider(ImageProvider):
             await asyncio.sleep(1.0)
 
         return None
+
+    async def edit_image(
+        self,
+        reference_image_bytes: bytes,
+        prompt: str,
+        negative_prompt: str = "",
+        width: int = 1024,
+        height: int = 1024,
+        seed: int = -1,
+    ) -> ProviderResult:
+        """Identity-locked edit: upload the reference image, run img2img.
+
+        The reference bytes are POSTed to ComfyUI's /upload/image endpoint so
+        the LoadImage node can consume them; a moderate denoise keeps the
+        facial structure of the reference while the prompt sets scene/outfit.
+        Returns the generated PNG bytes (not a filename key) so the identity
+        engine can persist them itself — the same contract as the
+        DashScopeImageProvider.edit_image implementation.
+        """
+        seed = random.randint(0, 2**31) if seed == -1 else seed
+        try:
+            client = await self._get_client()
+
+            # 1. Upload the reference image into ComfyUI's input directory.
+            resp = await client.post(
+                "/upload/image",
+                files={"image": ("reference.png", reference_image_bytes, "image/png")},
+                data={"overwrite": "true"},
+            )
+            resp.raise_for_status()
+            upload_info = resp.json()
+            image_name = upload_info.get("name", "reference.png")
+            subfolder = upload_info.get("subfolder", "")
+            if subfolder:
+                image_name = f"{subfolder}/{image_name}"
+
+            # 2. img2img with moderate denoise — strong enough for the new
+            #    scene, weak enough to preserve facial identity.
+            result = await self.img2img(
+                image_key=image_name,
+                prompt=prompt,
+                strength=0.55,
+                width=width,
+                height=height,
+                seed=seed,
+                negative_prompt=negative_prompt,
+            )
+            if not result.success:
+                return result
+
+            # 3. Download the rendered image from ComfyUI's /view endpoint.
+            filename = result.data["image_key"]
+            view = await client.get(
+                "/view",
+                params={"filename": filename, "subfolder": "", "type": "output"},
+            )
+            view.raise_for_status()
+            result.data["image_bytes"] = view.content
+            return result
+
+        except httpx.ConnectError:
+            return ProviderResult(
+                success=False,
+                error=f"Cannot connect to ComfyUI at {self._base_url}. Is ComfyUI running?",
+                provider=self._provider,
+            )
+        except Exception as e:
+            logger.error("comfyui_edit_image_failed", error=str(e))
+            return ProviderResult(success=False, error=str(e), provider=self._provider)
 
     async def img2img(
         self, image_key: str, prompt: str, strength: float = 0.75, **kwargs
@@ -266,7 +371,7 @@ class ComfyUIImageProvider(ImageProvider):
                 },
                 "4": {
                     "class_type": "CheckpointLoaderSimple",
-                    "inputs": {"ckpt_name": "sd_xl_base_1.0.safetensors"},
+                    "inputs": {"ckpt_name": checkpoint},
                 },
                 "6": {
                     "class_type": "CLIPTextEncode",
@@ -378,12 +483,32 @@ class ComfyUIImageProvider(ImageProvider):
             resp = await client.get("/system_stats")
             if resp.status_code == 200:
                 stats = resp.json()
+                models_resp = await client.get("/object_info")
+                model_names = []
+                if models_resp.status_code == 200:
+                    loader = models_resp.json().get("CheckpointLoaderSimple", {})
+                    model_names = (
+                        loader.get("input", {})
+                        .get("required", {})
+                        .get("ckpt_name", [[], {}])[0]
+                    )
+                if not model_names:
+                    return ProviderResult(
+                        success=False,
+                        error=(
+                            "ComfyUI is reachable but no checkpoint is installed. "
+                            "Add a compatible .safetensors/.ckpt file under "
+                            ".local/ComfyUI/models/checkpoints."
+                        ),
+                        provider=self._provider,
+                    )
                 return ProviderResult(
                     success=True,
                     data={
                         "status": "connected",
                         "gpu": stats.get("devices", [{}])[0].get("name", "unknown"),
                         "vram_total": stats.get("devices", [{}])[0].get("vram_total", 0),
+                        "checkpoints": model_names,
                     },
                     provider=self._provider,
                 )

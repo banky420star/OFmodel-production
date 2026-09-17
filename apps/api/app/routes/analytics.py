@@ -3,7 +3,6 @@
 from __future__ import annotations
 import json
 import time
-import random
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import Any
@@ -18,11 +17,11 @@ from app.models import (
     Persona, Identity, AnalyticsSnapshot, Forecast, Shoot, ContentPack,
     PersonaStatus, ShootStatus,
 )
-from app.routes.personas import ManualAnalyticsInput
 from app.schemas import (
-    AnalyticsSnapshotResponse, ForecastResponse, ForecastScenario,
+    AnalyticsSnapshotResponse, ForecastResponse, ForecastScenario, ManualAnalyticsInput,
 )
 from app.providers.registry import get_registry
+from app.providers.gates import require
 
 router = APIRouter()
 
@@ -59,8 +58,10 @@ async def dashboard_summary(db: AsyncSession = Depends(get_db)):
     # Health
     registry = get_registry()
     health = registry.health_report()
-    services_online = sum(1 for v in health.values() if v.get("status") == "green")
-    services_total = len(health)
+    required = set(registry.required_capabilities())
+    required_health = {k: v for k, v in health.items() if k in required}
+    services_online = sum(1 for v in required_health.values() if v.get("status") == "green")
+    services_total = len(required_health)
 
     # Build health checks array for frontend
     health_checks = [
@@ -147,110 +148,6 @@ async def get_analytics(persona_id: UUID, db: AsyncSession = Depends(get_db)):
     ]
 
 
-@router.post("/personas/{persona_id}/analytics/generate")
-async def generate_analytics(persona_id: UUID, db: AsyncSession = Depends(get_db)):
-    """Generate engagement-based analytics for the last 90 days.
-
-    Revenue is calculated from real engagement signals:
-    - Each like = R0.02, comment = R0.10, share = R0.25, view = R0.001
-    - Subscriber revenue = R150/month per 100 subscribers (OnlyFans avg)
-    - PPV revenue estimated from content quality score
-    """
-    persona = await db.get(Persona, persona_id)
-    if not persona:
-        raise HTTPException(404, "Persona not found")
-
-    # Count real engagement signals from the database
-    shoots_result = await db.execute(
-        select(Shoot).where(Shoot.persona_id == persona_id)
-    )
-    shoots = list(shoots_result.scalars().all())
-    shoot_count = len(shoots)
-
-    # Check fans for this persona
-    try:
-        from app.models import Fan
-        fans_result = await db.execute(
-            select(Fan).where(Fan.persona_id == persona_id)
-        )
-        fans = list(fans_result.scalars().all())
-        fan_count = len(fans)
-    except Exception:
-        fans = []
-        fan_count = 0
-
-    # Check social accounts
-    try:
-        from app.models import SocialAccount
-        social_result = await db.execute(
-            select(SocialAccount).where(SocialAccount.persona_id == persona_id)
-        )
-        socials = list(social_result.scalars().all())
-        active_socials = [s for s in socials if s.status == "active"]
-    except Exception:
-        active_socials = []
-
-    # Base metrics from real data
-    base_followers = max(100, fan_count * 50 + shoot_count * 200)
-    base_engagement = min(0.12, 0.03 + (shoot_count * 0.005) + (fan_count * 0.01))
-
-    now = datetime.now(timezone.utc)
-
-    for day_offset in range(90):
-        date = now - timedelta(days=90 - day_offset)
-        growth = 1 + (day_offset * 0.002) + random.uniform(-0.01, 0.015)
-
-        # Engagement grows with content volume
-        daily_likes = int(base_followers * base_engagement * random.uniform(0.5, 1.5))
-        daily_comments = int(daily_likes * random.uniform(0.1, 0.3))
-        daily_shares = int(daily_likes * random.uniform(0.02, 0.08))
-        daily_views = int(daily_likes * random.uniform(3, 8))
-
-        # Revenue from engagement
-        like_revenue = daily_likes * 0.02
-        comment_revenue = daily_comments * 0.10
-        share_revenue = daily_shares * 0.25
-        view_revenue = daily_views * 0.001
-
-        # Subscriber revenue (daily portion of monthly subscription)
-        subscriber_daily = (fan_count * 150 / 30) * random.uniform(0.7, 1.3)
-
-        # PPV revenue (random spikes from content drops)
-        ppv_daily = random.uniform(0, 500) if random.random() < 0.15 else 0
-
-        total_revenue = (
-            like_revenue + comment_revenue + share_revenue + view_revenue
-            + subscriber_daily + ppv_daily
-        )
-
-        snap = AnalyticsSnapshot(
-            id=uuid4(),
-            persona_id=persona_id,
-            snapshot_date=date,
-            platform="all",
-            followers=int(base_followers * growth),
-            likes=daily_likes,
-            comments=daily_comments,
-            shares=daily_shares,
-            views=daily_views,
-            engagement_rate=round(base_engagement * random.uniform(0.8, 1.2), 4),
-            revenue=round(total_revenue, 2),
-            costs=round(random.uniform(50, 200), 2),
-        )
-        db.add(snap)
-
-    await db.commit()
-    return {
-        "status": "generated",
-        "days": 90,
-        "source": "engagement-based",
-        "signals": {
-            "shoots": shoot_count,
-            "fans": fan_count,
-            "active_socials": len(active_socials),
-        },
-    }
-
 
 @router.post("/personas/{persona_id}/analytics/sync")
 async def sync_instagram_analytics(persona_id: UUID, db: AsyncSession = Depends(get_db)):
@@ -263,13 +160,8 @@ async def sync_instagram_analytics(persona_id: UUID, db: AsyncSession = Depends(
     if not persona:
         raise HTTPException(404, "Persona not found")
 
-    registry = get_registry()
-    ig = registry.get_instagram_provider()
-    if not ig:
-        raise HTTPException(
-            400,
-            "Instagram not configured. Set INSTAGRAM_ACCESS_TOKEN and INSTAGRAM_ACCOUNT_ID in .env"
-        )
+    # Real providers only — sync fails closed with the exact env vars to set.
+    ig = require("instagram")
 
     try:
         analytics = await ig.sync_analytics()
@@ -388,86 +280,4 @@ async def get_forecasts(persona_id: UUID, db: AsyncSession = Depends(get_db)):
     return forecasts
 
 
-@router.post("/personas/{persona_id}/forecasts/generate")
-async def generate_forecast(persona_id: UUID, db: AsyncSession = Depends(get_db)):
-    """Generate deterministic 24-month forecast."""
-    persona = await db.get(Persona, persona_id)
-    if not persona:
-        raise HTTPException(404, "Persona not found")
-
-    # Get latest analytics
-    snap_result = await db.execute(
-        select(AnalyticsSnapshot)
-        .where(AnalyticsSnapshot.persona_id == persona_id)
-        .order_by(AnalyticsSnapshot.snapshot_date.desc())
-        .limit(1)
-    )
-    latest = snap_result.scalar_one_or_none()
-
-    base_followers = latest.followers if latest else 1000
-    base_revenue = latest.revenue if latest else 1000
-
-    # Deterministic 24-month projection
-    followers = []
-    revenue = []
-    costs = []
-    engagement = []
-    monthly_growth = 0.05  # 5% monthly growth
-    monthly_cost = 300.0   # base cost
-
-    for month in range(24):
-        factor = (1 + monthly_growth) ** month
-        f = int(base_followers * factor)
-        r = round(base_revenue * factor * random.uniform(0.9, 1.1), 2)
-        c = round(monthly_cost + (f * 0.01), 2)  # cost scales with followers
-        e = round(random.uniform(0.03, 0.06), 4)
-
-        followers.append(f)
-        revenue.append(r)
-        costs.append(c)
-        engagement.append(e)
-
-    # Find break-even month
-    break_even = None
-    for i, (r, c) in enumerate(zip(revenue, costs)):
-        if r > c:
-            break_even = i + 1
-            break
-
-    forecast = Forecast(
-        id=uuid4(),
-        persona_id=persona_id,
-        forecast_date=datetime.now(timezone.utc),
-        horizon_months=24,
-        projected_followers=followers,
-        projected_revenue=revenue,
-        projected_costs=costs,
-        projected_engagement=engagement,
-        model_version="deterministic_v1",
-        metadata_json={"break_even_month": break_even},
-    )
-    db.add(forecast)
-    await db.commit()
-
-    return ForecastResponse(
-        id=forecast.id,
-        persona_id=forecast.persona_id,
-        horizon_months=24,
-        scenarios=[
-            ForecastScenario(
-                scenario="base",
-                horizon_months=24,
-                monthly_followers=followers,
-                monthly_revenue=revenue,
-                monthly_costs=costs,
-                monthly_engagement=engagement,
-                break_even_month=break_even,
-            )
-        ],
-        model_version="deterministic_v1",
-        created_at=forecast.created_at,
-    )
-
-
 # ─── Identities (Phase 2) ───────────────────────────────────────────
-

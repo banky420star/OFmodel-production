@@ -137,6 +137,21 @@ async def system_health():
         "environment": "development",
     }
 
+
+@router.get("/system/providers")
+async def system_providers():
+    """Live per-capability provider table for the Settings UI.
+
+    Each row: capability, selected provider, status (green|yellow|red),
+    plain-language detail, and the env var to fix when not configured.
+    """
+    registry = get_registry()
+    rows = registry.startup_selfcheck()
+    return {
+        "capabilities": rows,
+        "required": list(registry.required_capabilities()),
+    }
+
 # Styles and Health
 @router.get("/styles")
 async def list_styles(category: str = ""):

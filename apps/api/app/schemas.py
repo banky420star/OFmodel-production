@@ -107,7 +107,7 @@ class ReferenceDatasetResponse(BaseModel):
     identity_id: UUID
     name: str
     total_images: int
-    quality_score: float
+    quality_score: float | None = None
     created_at: datetime
 
     class Config:
@@ -145,7 +145,6 @@ class WorkflowStepResponse(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     error_message: str
-    output_data: dict = {}
 
     class Config:
         from_attributes = True
@@ -254,6 +253,13 @@ class AnalyticsSnapshotResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class ManualAnalyticsInput(BaseModel):
+    followers: int = 0
+    engagement_rate: float = 0.0
+    revenue: float = 0.0
+    platform: str = "instagram"
 
 
 # ─── Forecast ──────────────────────────────────────────────────────────

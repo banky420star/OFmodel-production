@@ -132,12 +132,9 @@ class DashScopeWanProvider(VideoProvider):
 
             # Use size format that DashScope actually accepts
             size = f"{width}*{height}"
-            # NOTE: duration must NOT be sent — wan2.1-t2v-turbo rejects it
-            # ("duration customization is not supported", InvalidParameter).
-            # The model returns its fixed clip length (~5s); we record the
-            # real duration from the result metadata after download.
             params = {
                 "size": size,
+                "duration": dur_sec,
             }
 
             payload = {
@@ -277,8 +274,10 @@ class DashScopeWanProvider(VideoProvider):
             # Convert local file path to base64 data URI if needed
             media_url = image_key
             if not image_key.startswith("http") and not image_key.startswith("data:"):
-                # Local file path — resolve relative to API root
-                local_path = Path("/Users/bank/Downloads/Gemma_Local_Agent_v3_MODEL_FIX/apps/api") / image_key
+                # Local file path — resolve relative to this installation's API root.
+                local_path = Path(image_key)
+                if not local_path.is_absolute():
+                    local_path = Path(__file__).resolve().parents[2] / image_key
                 if local_path.exists():
                     img_bytes = local_path.read_bytes()
                     # Resize large images to reduce base64 payload
@@ -297,6 +296,12 @@ class DashScopeWanProvider(VideoProvider):
                     b64 = base64.b64encode(img_bytes).decode()
                     media_url = f"data:image/{ext};base64,{b64}"
                     logger.info("i2v_image_encoded", path=str(local_path), size=len(img_bytes))
+                else:
+                    return ProviderResult(
+                        success=False,
+                        error=f"Source image not found: {local_path}",
+                        provider=self._provider,
+                    )
 
             # Wan 2.7 i2v uses media as an array of media objects
             input_data = {

@@ -3,19 +3,19 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.persona.api</string>
+  <string>com.persona.web</string>
   <key>ProgramArguments</key>
   <array>
     <string>/bin/sh</string>
     <string>-c</string>
-    <string>cd /Volumes/AI_DRIVE/persona/apps/api && exec /Volumes/AI_DRIVE/persona/apps/api/.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000</string>
+    <string>cd /Volumes/AI_DRIVE/persona/apps/web && PATH=/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin exec npm run dev</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>/Volumes/AI_DRIVE/persona/apps/api</string>
+  <string>/Volumes/AI_DRIVE/persona/apps/web</string>
   <key>StandardOutPath</key>
-  <string>/tmp/persona_api.log</string>
+  <string>/tmp/persona_web.log</string>
   <key>StandardErrorPath</key>
-  <string>/tmp/persona_api.log</string>
+  <string>/tmp/persona_web.log</string>
   <key>KeepAlive</key>
   <true/>
   <key>RunAtLoad</key>

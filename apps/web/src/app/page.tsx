@@ -1,7 +1,6 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { useRouter } from 'next/navigation'
 import { getDashboardSummary } from '@/lib/api'
 import type { DashboardSummary } from '@/lib/types'
 import { GRADIENTS } from '@/lib/constants'
@@ -36,19 +35,6 @@ export default function Dashboard() {
   const [summary, setSummary] = useState<DashboardSummary | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const router = useRouter()
-
-  // ⌘K / Ctrl+K jumps to the models list — the search button's real behavior.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
-        e.preventDefault()
-        router.push('/models')
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [router])
 
   useEffect(() => {
     getDashboardSummary()
@@ -96,7 +82,7 @@ export default function Dashboard() {
           <div style={{ textAlign: 'center', maxWidth: 360 }}>
             <div style={{ fontSize: 32, marginBottom: 12 }}>⚠️</div>
             <p style={{ color: 'var(--text)', fontWeight: 600, fontSize: 15, marginBottom: 6 }}>Could not reach the API</p>
-            <p style={{ color: 'var(--text-muted)', fontSize: 13, marginBottom: 16, lineHeight: 1.5 }}>{error}. Make sure the API server is running on port 8001.</p>
+            <p style={{ color: 'var(--text-muted)', fontSize: 13, marginBottom: 16, lineHeight: 1.5 }}>{error}. Make sure the API server is running on port 8000.</p>
             <button className="primary-button" onClick={() => { setLoading(true); setError(null); window.location.reload() }}>{Icons.activity} Retry</button>
           </div>
         </div>
@@ -113,7 +99,7 @@ export default function Dashboard() {
         <button className="mobile-menu" aria-label="Open menu">{Icons.menu}</button>
         <div className="crumb"><span>Persona Studio</span><b>/</b><strong>Overview</strong></div>
         <div className="top-actions">
-          <button className="search-button" onClick={() => router.push('/models')}>{Icons.search}<span>Search or jump to…</span><kbd>⌘ K</kbd></button>
+          <button className="search-button">{Icons.search}<span>Search or jump to…</span><kbd>⌘ K</kbd></button>
           <a href="/models/create"><button className="primary-button">{Icons.plus} Create model</button></a>
         </div>
       </header>

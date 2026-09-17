@@ -2,6 +2,9 @@
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
 [project]
 name = "persona-studio-api"
 version = "0.1.0"
@@ -15,9 +18,6 @@ dependencies = [
     "alembic>=1.13.0",
     "pydantic>=2.7.0",
     "pydantic-settings>=2.3.0",
-    "redis[hiredis]>=5.0.0",
-    "celery[redis]>=5.4.0",
-    "minio>=7.2.0",
     "httpx>=0.27.0",
     "structlog>=24.0.0",
     "python-multipart>=0.0.9",
@@ -34,6 +34,14 @@ dev = [
     "pytest-cov>=5.0.0",
     "httpx>=0.27.0",
     "factory-boy>=3.3.0",
+]
+# Local (free) MPS LoRA trainer — TRAINER_PROVIDER=hf
+trainer = [
+    "torch>=2.3.0",
+    "diffusers>=0.30.0",
+    "peft>=0.11.0",
+    "transformers>=4.42.0",
+    "safetensors>=0.4.0",
 ]
 
 [tool.pytest.ini_options]

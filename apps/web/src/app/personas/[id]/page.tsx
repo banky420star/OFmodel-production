@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import {
-  getPersona, listIdentities, listShoots, getShootImages, listPacks, listWorkflows,
+  getPersona, listIdentities, listShoots, listPacks, listWorkflows,
   getAnalytics, getForecasts, getSchedule, getGallery,
   createShoot, createPack,
   generateAnalytics, generateForecast, generateSchedule,
@@ -56,22 +56,12 @@ function ErrorState({ error, retry }: { error: string; retry: () => void }) {
 
 /* ── Tab panels ───────────────────────────────────────── */
 
-function OverviewTab({ id, persona }: { id: string; persona: any }) {
-  // Identity state lives on the approved Identity row (the persona build creates
-  // it) — the persona row's own identity_* columns are never populated.
-  const { data: identities } = useTabData(id, () => listIdentities(id), [id])
-  const approved = (identities || []).find((i: any) => i.status === 'ready')
-  const score = approved?.consistency_score
+function OverviewTab({ persona }: { persona: any }) {
   const items = [
     { label: 'Status', value: persona.status },
-    {
-      label: 'Identity',
-      value: approved
-        ? `${approved.name}${typeof score === 'number' && score > 0 ? ` · ${(score * 100).toFixed(1)}%` : ''}`
-        : 'Pending build',
-    },
+    { label: 'Identity', value: persona.identity_score ? `${(persona.identity_score * 100).toFixed(1)}%` : 'N/A' },
     { label: 'Content Packs', value: persona.packs_count },
-    { label: 'Voice', value: approved ? 'READY' : 'PENDING' },
+    { label: 'Voice', value: persona.identity_status === 'ready' ? 'READY' : 'PENDING' },
   ]
   return (
     <div className="grid-4">
@@ -139,17 +129,6 @@ function ShootsTab({ id }: { id: string }) {
   const { data: shoots, loading, error, retry, setData } = useTabData(id, () => listShoots(id), [id])
   const [busy, setBusy] = useState(false)
   const [toast, setToast] = useState<ToastState>(null)
-  const [expanded, setExpanded] = useState<Set<string>>(new Set())
-  const [lightbox, setLightbox] = useState<{ shoot: string; url: string } | null>(null)
-
-  const toggleShoot = (shootId: string) => {
-    setExpanded(prev => {
-      const next = new Set(prev)
-      if (next.has(shootId)) next.delete(shootId)
-      else next.add(shootId)
-      return next
-    })
-  }
   const handleCreate = async () => {
     setBusy(true)
     try {
@@ -172,72 +151,12 @@ function ShootsTab({ id }: { id: string }) {
         </button>
       </div>
       {shoots?.map((s: any) => (
-        <ShootRow key={s.id} shoot={s} expanded={expanded.has(s.id)}
-          onToggle={() => toggleShoot(s.id)} lightbox={lightbox} setLightbox={setLightbox} />
+        <div key={s.id} className="panel list-row">
+          <span className="field-value">{s.name || s.theme}</span>
+          <StatusBadge status={s.status} />
+        </div>
       ))}
       {shoots?.length === 0 && <p className="muted-md">No shoots yet — create one, then run Auto-Produce.</p>}
-      {lightbox && (
-        <div className="gallery-lightbox" onClick={() => setLightbox(null)}>
-          <img src={lightbox.url} alt="Full size" style={{ maxWidth: '90vw', maxHeight: '85vh', borderRadius: 8 }} />
-        </div>
-      )}
-    </div>
-  )
-}
-
-function ShootRow({ shoot, expanded, onToggle, lightbox, setLightbox }: {
-  shoot: any; expanded: boolean; onToggle: () => void
-  lightbox: { shoot: string; url: string } | null
-  setLightbox: (v: { shoot: string; url: string } | null) => void
-}) {
-  const imgCount = shoot.generated_images?.length || 0
-  const hasImages = imgCount > 0
-  return (
-    <div className="panel" style={{ padding: 0 }}>
-      <button
-        onClick={onToggle}
-        disabled={!hasImages}
-        style={{ all: 'unset', display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', padding: 12, cursor: hasImages ? 'pointer' : 'default' }}
-      >
-        <span className="field-value">
-          {shoot.name || shoot.theme}
-          {hasImages && <span className="muted-sm" style={{ marginLeft: 8 }}>{imgCount} image{imgCount === 1 ? '' : 's'}{expanded ? ' ▴' : ' ▾'}</span>}
-        </span>
-        <StatusBadge status={shoot.status} />
-      </button>
-      {expanded && hasImages && (
-        <ShootImages shootId={shoot.id} lightbox={lightbox} setLightbox={setLightbox} />
-      )}
-    </div>
-  )
-}
-
-function ShootImages({ shootId, lightbox, setLightbox }: {
-  shootId: string
-  lightbox: { shoot: string; url: string } | null
-  setLightbox: (v: { shoot: string; url: string } | null) => void
-}) {
-  const { data, loading, error, retry } = useTabData(
-    shootId, () => getShootImages(shootId), [shootId],
-  )
-  if (loading) return <p className="muted-md" style={{ padding: '0 12px 12px' }}>Loading images…</p>
-  if (error) return (
-    <div style={{ padding: '0 12px 12px' }}>
-      <p className="muted-md">Couldn&apos;t load images.</p>
-      <button onClick={retry} className="secondary-button btn-sm">Try again</button>
-    </div>
-  )
-  if (!data?.images?.length) return <p className="muted-md" style={{ padding: '0 12px 12px' }}>No images stored for this shoot.</p>
-  return (
-    <div style={{ padding: '4px 12px 12px' }}>
-      <div className="gallery-grid">
-        {data.images.map((img: any, i: number) => (
-          <button key={i} className="gallery-thumb" onClick={() => setLightbox({ shoot: shootId, url: img.url })}>
-            <img src={img.url} alt={img.filename} />
-            <span className="gallery-label">{img.filename}</span>
-          </button>
-        ))}
-      </div>
     </div>
   )
 }
@@ -463,7 +382,7 @@ export default function PersonaPage() {
   }
 
   const tabContent = {
-    overview: <OverviewTab id={id} persona={persona} />,
+    overview: <OverviewTab persona={persona} />,
     gallery: <GalleryTab id={id} />,
     identity: <IdentityTab id={id} />,
     shoots: <ShootsTab id={id} />,

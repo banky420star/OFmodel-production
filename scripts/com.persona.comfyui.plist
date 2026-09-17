@@ -3,19 +3,19 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.persona.api</string>
+  <string>com.persona.comfyui</string>
   <key>ProgramArguments</key>
   <array>
     <string>/bin/sh</string>
     <string>-c</string>
-    <string>cd /Volumes/AI_DRIVE/persona/apps/api && exec /Volumes/AI_DRIVE/persona/apps/api/.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000</string>
+    <string>cd /Volumes/AI_DRIVE/persona/.local/ComfyUI && exec /Volumes/AI_DRIVE/persona/.local/comfy-venv/bin/python -u main.py --listen 127.0.0.1 --port 8188 --lowvram</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>/Volumes/AI_DRIVE/persona/apps/api</string>
+  <string>/Volumes/AI_DRIVE/persona/.local/ComfyUI</string>
   <key>StandardOutPath</key>
-  <string>/tmp/persona_api.log</string>
+  <string>/tmp/persona_comfyui.log</string>
   <key>StandardErrorPath</key>
-  <string>/tmp/persona_api.log</string>
+  <string>/tmp/persona_comfyui.log</string>
   <key>KeepAlive</key>
   <true/>
   <key>RunAtLoad</key>

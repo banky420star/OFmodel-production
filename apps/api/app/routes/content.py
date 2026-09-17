@@ -1,12 +1,12 @@
 """Persona Studio — content routes."""
 
 from __future__ import annotations
-import hashlib
 import json
 import logging
 import time
 import random
 import asyncio
+import zlib
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import Any
@@ -14,12 +14,12 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Form
 from pydantic import BaseModel
-from sqlalchemy import select, func, text, String as SAString, cast as sa_cast
+from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger("persona_studio.content")
 
-from app.database import get_db
+from app.database import get_db, AsyncSessionLocal
 from app.models import (
     Persona, Shoot, ContentPack, GeneratedVideo, GeneratedVoice,
     ShootStatus, ContentPackStatus, Identity, Job, IdentityLock,
@@ -36,6 +36,19 @@ from app.workflows.content_flow import (
     generate_captions_handler, finalize_pack_handler,
 )
 from app.providers.registry import get_registry
+from app.providers.gates import require, CAPABILITY_REQUIREMENTS, require_adult_image
+from app.jobs.runner import spawn_job
+
+
+def _require_adult_allowed():
+    """Global + provider gate for adult content: kill-switch and adult-capable image provider."""
+    from app.config import get_settings
+    if not get_settings().ADULT_CONTENT_ENABLED:
+        raise HTTPException(
+            403,
+            "Adult content is disabled globally — set ADULT_CONTENT_ENABLED=true in .env",
+        )
+    require_adult_image()
 
 router = APIRouter()
 
@@ -60,19 +73,18 @@ async def get_shoot_images(shoot_id: str, db: AsyncSession = Depends(get_db)):
     # Try full UUID first, then short hex lookup
     shoot = None
     try:
-        shoot = await db.get(Shoot, UUID(shoot_id))
-    except (ValueError, TypeError, AttributeError):
-        shoot = None
+        shoot = await db.get(Shoot, shoot_id)
+    except Exception:
+        pass
     if not shoot:
-        # Short hex — ORM prefix scan. (No sqlite3 side-channel here: a second
-        # connection ignores the request session and DATABASE_URL, so it cannot
-        # see rows this server created — the same defect class as the
-        # identity-lock invisibility bug.)
+        # Short hex — match by UUID prefix through the ORM (no sync side-channel;
+        # works on both SQLite and Postgres).
         hex_prefix = shoot_id.replace("-", "").lower()
-        result = await db.execute(
-            select(Shoot).where(sa_cast(Shoot.id, SAString).like(f"{hex_prefix[:8]}%"))
-        )
-        shoot = result.scalars().first()
+        candidates = await db.execute(select(Shoot))
+        for candidate in candidates.scalars().all():
+            if candidate.id.hex.startswith(hex_prefix):
+                shoot = candidate
+                break
     if not shoot:
         raise HTTPException(404, "Shoot not found")
 
@@ -152,6 +164,7 @@ async def complete_shoot(shoot_id: UUID, db: AsyncSession = Depends(get_db)):
 # ─── Content Packs (Phase 5) ─────────────────────────────────────────
 
 @router.get("/packs", response_model=list[ContentPackResponse])
+@router.get("/personas/{persona_id}/packs", response_model=list[ContentPackResponse])
 async def list_packs(
     persona_id: UUID | None = None,
     db: AsyncSession = Depends(get_db),
@@ -202,13 +215,16 @@ async def generate_video(
     if not persona.adult_verified:
         raise HTTPException(403, "Persona not adult-verified — cannot generate video")
 
+    # Real providers only — video generation needs image + video capabilities.
+    require(*CAPABILITY_REQUIREMENTS["auto_produce_video"])
+
     registry = get_registry()
     video_provider = registry.get_video_provider()
 
     # Build prompt from persona identity if not provided
     if not prompt:
         from app.identity_engine import get_identity_lock
-        lock = get_identity_lock(persona_id.hex)
+        lock = await get_identity_lock(persona_id.hex, db)
         identity_desc = lock["identity_prompt"] if lock else persona.name
         prompt = f"{identity_desc}, {persona.brand or 'lifestyle'}, natural movement, cinematic"
 
@@ -223,23 +239,6 @@ async def generate_video(
     if not result.success:
         raise HTTPException(502, f"Video generation failed: {result.error}")
 
-    # Download the generated file from the provider URL. The provider only
-    # returns a temporary OSS link — without this, the video_key points at a
-    # file that never exists locally (the bug behind 14 orphan video rows).
-    import httpx
-    from pathlib import Path as _Path
-
-    video_url = result.data.get("video_url", "")
-    video_key = result.data.get("video_key", "")
-    local_bytes = 0
-    if video_url and video_key:
-        dest = _Path(__file__).resolve().parent.parent.parent / "storage" / video_key
-        async with httpx.AsyncClient(timeout=300) as dl:
-            dl_resp = await dl.get(video_url)
-            dl_resp.raise_for_status()
-            dest.write_bytes(dl_resp.content)
-            local_bytes = len(dl_resp.content)
-
     # Resolve identity_id for this persona
     from app.models import Identity
     identity_result = await db.execute(
@@ -252,7 +251,7 @@ async def generate_video(
         id=uuid4(),
         identity_id=identity.id if identity else None,
         prompt=prompt,
-        video_key=video_key,
+        video_key=result.data.get("video_key", ""),
         duration_seconds=result.data.get("duration", duration),
         width=result.data.get("width", 720),
         height=result.data.get("height", 1280),
@@ -260,9 +259,7 @@ async def generate_video(
         metadata_json={
             "model": result.data.get("model", ""),
             "task_id": result.data.get("task_id", ""),
-            "video_url": video_url,
-            "bytes": local_bytes,
-            "is_mock": False,
+            "video_url": result.data.get("video_url", ""),
         },
     )
     db.add(video)
@@ -323,26 +320,12 @@ async def generate_shoot_video(
     if not result.success:
         raise HTTPException(502, f"Video generation failed: {result.error}")
 
-    # Download the generated file from the provider URL (same orphan-file fix
-    # as the persona video route — the provider link is temporary OSS only).
-    import httpx
-    from pathlib import Path as _Path
-
-    video_url = result.data.get("video_url", "")
-    video_key = result.data.get("video_key", "")
-    if video_url and video_key:
-        dest = _Path(__file__).resolve().parent.parent.parent / "storage" / video_key
-        async with httpx.AsyncClient(timeout=300) as dl:
-            dl_resp = await dl.get(video_url)
-            dl_resp.raise_for_status()
-            dest.write_bytes(dl_resp.content)
-
     # Store video linked to shoot
     video = GeneratedVideo(
         id=uuid4(),
         identity_id=shoot.identity_id if getattr(shoot, 'identity_id', None) else None,
         prompt=prompt,
-        video_key=video_key,
+        video_key=result.data.get("video_key", ""),
         duration_seconds=result.data.get("duration", duration),
         generation_time_ms=result.data.get("generation_time_ms", 0),
         metadata_json={
@@ -350,9 +333,8 @@ async def generate_shoot_video(
             "shot_index": shot_index,
             "model": result.data.get("model", ""),
             "task_id": result.data.get("task_id", ""),
-            "video_url": video_url,
+            "video_url": result.data.get("video_url", ""),
             "source_image": image_path,
-            "is_mock": False,
         },
     )
     db.add(video)
@@ -433,7 +415,11 @@ async def generate_adult_content(
     # Synthetic identity requirement
     if not persona.synthetic_identity:
         raise HTTPException(403, "Only synthetic identities can generate adult content")
-    
+
+    # Layer 1-3 of the adult gate: global kill-switch, per-persona opt-in
+    # (checked above), and adult-capable image provider + moderation.
+    _require_adult_allowed()
+
     # Content type validation
     allowed_types = ["artistic", "editorial", "boudoir", "nsfw"]
     if body.content_type not in allowed_types:
@@ -455,8 +441,7 @@ async def generate_adult_content(
     # Generate using identity engine
     from app.identity_engine import generate_identity_locked
 
-    # parent.parent.parent — must match main.py's ADULT_DIR (apps/api/storage)
-    content_dir = Path(__file__).parent.parent.parent / "storage" / "adult_content" / persona_id.hex[:8]
+    content_dir = Path(__file__).parent.parent / "storage" / "adult_content" / persona_id.hex[:8]
     content_dir.mkdir(parents=True, exist_ok=True)
     
     filename = f"{body.content_type}_{int(time.time())}.png"
@@ -474,11 +459,20 @@ async def generate_adult_content(
     if not result["success"]:
         raise HTTPException(502, f"Generation failed: {result.get('error', 'unknown')}")
     
-    # Content moderation check
+    # Content moderation check — fail-closed: if the classifier could not run,
+    # the asset is deleted and the endpoint refuses (nothing unmoderated is
+    # ever persisted or served).
     from app.providers.moderation import get_moderator
     moderator = get_moderator()
     moderation_result = await moderator.classify_image(output_path)
-    
+    if not moderation_result.get("moderation_available"):
+        Path(output_path).unlink(missing_ok=True)
+        raise HTTPException(
+            503,
+            "Content moderation unavailable — asset blocked (fail-closed). "
+            "Set HUGGINGFACE_API_KEY in .env.",
+        )
+
     # Log for audit trail
     import hashlib
     content_hash = hashlib.sha256(open(output_path, "rb").read()).hexdigest()[:16]
@@ -538,6 +532,11 @@ async def auto_produce(
     if not ok:
         raise HTTPException(409, reason)
 
+    # Real providers only — gate before anything is written.
+    require(*CAPABILITY_REQUIREMENTS["auto_produce_video" if generate_videos else "auto_produce"])
+    if adult_content:
+        _require_adult_allowed()
+
     lock = await ensure_identity_lock(persona, db)
     if lock.status != IdentityLockStatus.ACTIVE:
         raise HTTPException(
@@ -556,31 +555,25 @@ async def auto_produce(
     if running:
         raise HTTPException(409, "Production already running for this persona")
     
-    # Create job for progress tracking
-    job = Job(
-        id=uuid4(),
-        type="auto_produce",
-        status="queued",
-        progress=0,
-        message=f"Setting up production for {persona.name}",
+    # Create the job row and run under the bounded job runner.
+    job = await spawn_job(
+        db,
+        job_type="auto_produce",
         persona_id=persona_id,
-        metadata_json={
+        message=f"Setting up production for {persona.name}",
+        metadata={
             "shoot_count": shoot_count,
             "images_per_shoot": images_per_shoot,
             "generate_videos": generate_videos,
             "adult_content": adult_content,
         },
+        coro_factory=lambda job_id: _run_auto_produce(
+            job_id, persona_id, shoot_count, images_per_shoot,
+            generate_videos, adult_content, themes,
+        ),
+        session_factory=AsyncSessionLocal,
     )
-    db.add(job)
-    await db.commit()
-    
-    # Run in background
-    import asyncio
-    asyncio.create_task(_run_auto_produce(
-        job.id, persona_id, shoot_count, images_per_shoot,
-        generate_videos, adult_content, themes,
-    ))
-    
+
     return {
         "job_id": str(job.id),
         "status": "queued",
@@ -688,7 +681,6 @@ async def _run_auto_produce(
     completed = 0
     all_results = []
     gen_provider = ""
-    gen_is_mock = False
     
     registry = get_registry()
     video_provider = registry.get_video_provider()
@@ -733,30 +725,42 @@ async def _run_auto_produce(
                     persona_id_hex=persona_id.hex,
                     scene_prompt=full_prompt,
                     output_path=output_path,
-                    # hash() is salted per process — the seed would change on
-                    # every API restart. Use a stable digest instead.
-                    seed_override=int(hashlib.md5(f"{shoot_id.hex}_{i}".encode()).hexdigest()[:8], 16) % 2147483647,
+                    seed_override=zlib.crc32(f"{shoot_id.hex}_{i}".encode()) % 2147483647,
                 )
                 if result["success"]:
                     gen_provider = result.get("provider", "unknown")
-                    gen_is_mock = result.get("is_mock", False)
-                    # Content moderation check — real images only; mock
-                    # placeholder squares are labelled as skipped.
-                    if gen_is_mock:
-                        mod_result = {"safe": True, "nsfw_score": 0.0, "label": "skipped_mock"}
-                    else:
-                        from app.providers.moderation import get_moderator
-                        moderator = get_moderator()
-                        mod_result = await moderator.classify_image(output_path)
-                    if not mod_result["safe"]:
+                    # Content moderation — fail-closed. A classifier that could
+                    # not run is treated exactly like an unsafe image: the file
+                    # is deleted and the shot counts as an error.
+                    from app.providers.moderation import get_moderator
+                    moderator = get_moderator()
+                    mod_result = await moderator.classify_image(output_path)
+                    if not mod_result.get("moderation_available"):
+                        Path(output_path).unlink(missing_ok=True)
+                        gen_errors.append(
+                            "Moderation unavailable — image blocked (fail-closed). "
+                            "Set HUGGINGFACE_API_KEY in .env."
+                        )
+                        logger.error(
+                            "moderation_unavailable_blocked",
+                            path=output_path,
+                            note=mod_result.get("note", ""),
+                        )
+                    elif not mod_result["safe"]:
+                        Path(output_path).unlink(missing_ok=True)
+                        gen_errors.append(
+                            f"Moderation flagged image (nsfw_score="
+                            f"{mod_result['nsfw_score']}) — deleted"
+                        )
                         logger.warning(
                             "moderation_flagged",
                             path=output_path,
                             nsfw_score=mod_result["nsfw_score"],
                         )
-                    # Store as relative path for the image serving endpoint
-                    rel = f"storage/shoots/{shoot_id.hex[:8]}/shot_{i+1:02d}.png"
-                    shoot_images.append(rel)
+                    else:
+                        # Store as relative path for the image serving endpoint
+                        rel = f"storage/shoots/{shoot_id.hex[:8]}/shot_{i+1:02d}.png"
+                        shoot_images.append(rel)
                 else:
                     gen_errors.append(result.get("error", "unknown generation failure"))
             except Exception as e:
@@ -880,7 +884,7 @@ async def _run_auto_produce(
             else:
                 job.status = "completed"
                 job.progress = 100
-                provider_note = "mock provider" if gen_is_mock else f"{gen_provider}" if gen_provider else "unknown provider"
+                provider_note = f"{gen_provider}" if gen_provider else "unknown provider"
                 job.message = (
                     f"Production complete for {name} — {total_images} images via {provider_note}"
                 )
@@ -888,10 +892,8 @@ async def _run_auto_produce(
                 **(job.metadata_json or {}),
                 "results": all_results,
                 "image_provider": gen_provider,
-                "is_mock": gen_is_mock,
             }
             await db.commit()
 
 
 # ─── Artistic Styles ────────────────────────────────────────────────
-

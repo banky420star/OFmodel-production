@@ -57,8 +57,8 @@ class HuggingFaceImageProvider(ImageProvider):
 
     def _get_storage(self):
         if self._storage is None:
-            from app.providers.mocks import MockStorageProvider
-            self._storage = MockStorageProvider()
+            from app.providers.filesystem_storage import FileSystemStorageProvider
+            self._storage = FileSystemStorageProvider()
         return self._storage
 
     async def generate(

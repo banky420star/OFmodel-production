@@ -26,6 +26,7 @@ const icons = {
   production: icon(<><path d="m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72"/><path d="m14 7 3 3"/><path d="M5 6v4"/><path d="M19 14v4"/><path d="M10 2v2"/><path d="M7 8H3"/><path d="M21 16h-4"/><path d="M11 3H9"/></>),
   calendar: icon(<><path d="M8 2v3"/><path d="M16 2v3"/><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M8 13h.01"/><path d="M12 13h.01"/><path d="M16 13h.01"/><path d="M8 17h.01"/><path d="M12 17h.01"/><path d="M16 17h.01"/></>),
   analytics: icon(<><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></>),
+  monetization: icon(<><circle cx="12" cy="12" r="9"/><path d="M15 8.5c-.7-.6-1.7-1-3-1-1.7 0-3 .8-3 2s1.1 1.8 3 2.2 3 1 3 2.3-1.3 2.2-3 2.2c-1.3 0-2.3-.4-3-1"/><path d="M12 5.5v13"/></>),
   registry: icon(<><path d="M4 10c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h4c1.1 0 2 .9 2 2"/><path d="M10 16c-1.1 0-2-.9-2-2v-4c0-1.1.9-2 2-2h4c1.1 0 2 .9 2 2"/><rect width="8" height="8" x="14" y="14" rx="2"/></>),
   rights: icon(<><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></>),
   chat: icon(<><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22z"/></>),
@@ -35,7 +36,6 @@ const icons = {
 
 export default function Sidebar() {
   const pathname = usePathname()
-  const [open, setOpen] = useState(false)
   const [shootCount, setShootCount] = useState(0)
   const [healthChecks, setHealthChecks] = useState<{ service: string; status: string }[]>([])
 
@@ -47,22 +47,6 @@ export default function Sidebar() {
       })
       .catch(() => {})
   }, [])
-
-  // The per-page topbars render a .mobile-menu button; clicking any of them
-  // opens this sidebar (click delegation — no per-page wiring needed). Tapping
-  // the dimmed backdrop closes it.
-  useEffect(() => {
-    const onDocClick = (e: MouseEvent) => {
-      const t = e.target as HTMLElement
-      if (t.closest?.('.mobile-menu')) setOpen(true)
-      else if (open && !t.closest?.('.sidebar')) setOpen(false)
-    }
-    document.addEventListener('click', onDocClick)
-    return () => document.removeEventListener('click', onDocClick)
-  }, [open])
-
-  // Route changes (including tapping a nav item on mobile) close the drawer
-  useEffect(() => { setOpen(false) }, [pathname])
 
   const isActive = (href: string) => {
     if (href === '/') return pathname === '/'
@@ -80,13 +64,12 @@ export default function Sidebar() {
     { label: 'Overview', href: '/', icon: icons.overview },
     { label: 'Models', href: '/models', icon: icons.models },
     { label: 'Production', href: '/production', icon: icons.production, badge: shootCount },
-    { label: 'Managers', href: '/manager', icon: icon(<><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></>) },
     { label: 'Chat', href: '/chat', icon: icons.chat },
     { label: 'Mailboxes', href: '/mailbox', icon: icon(<><rect width="20" height="14" x="2" y="5" rx="2"/><path d="M22 5v14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></>) },
     { label: 'Socials', href: '/socials', icon: icon(<><path d="M18 2h-3a5 5 0 0 0-5 5v3H7v4h3v8h4v-8h3l1-4h-4V7a1 1 0 0 1 1-1h3z"/></>) },
     { label: 'Calendar', href: '/calendar', icon: icons.calendar },
     { label: 'Analytics', href: '/analytics', icon: icons.analytics },
-    { label: 'Monetization', href: '/monetization', icon: icon(<><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/></>) },
+    { label: 'Monetization', href: '/monetization', icon: icons.monetization },
   ]
 
   const systemItems: NavItem[] = [
@@ -96,13 +79,13 @@ export default function Sidebar() {
   ]
 
   return (
-    <aside className={open ? 'sidebar open' : 'sidebar'}>
+    <aside className="sidebar">
       <div className="brand">
         <span className="brand-mark">{sparkles}</span>
         <span>Persona<span>Studio</span></span>
       </div>
 
-      <button className="sidebar-close" aria-label="Close menu" onClick={() => setOpen(false)}>
+      <button className="sidebar-close" aria-label="Close menu">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
       </button>
 

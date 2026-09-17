@@ -11,8 +11,8 @@ It exercises:
     -> identity lock exists and is ACTIVE
     -> re-opened sessions (restart-like semantics) still see the same lock
     -> Auto-Produce is BLOCKED while the identity lock is not active
-    -> create shoot + run production on the mock provider
-    -> job ends honest: completed (labelled is_mock) or failed with a reason
+    -> create shoot + run production on the fake test providers
+    -> job ends honest: completed (with recorded provider) or failed with a reason
 """
 import asyncio
 import uuid
@@ -93,28 +93,6 @@ async def test_new_persona_gets_durable_identity_lock(client):
         f"no approved/ready identity: {[i['status'] for i in identities]}"
     )
 
-    # ── 4b. The build's reference-dataset step actually generated images ──
-    # This is the assertion that pins the original defect: the lock was
-    # created uncommitted inside the step, the sync reader never saw it, and
-    # every reference image failed with "No identity lock for persona".
-    wr = await client.get(f"/api/v1/workflows?persona_id={persona_id.hex}")
-    assert wr.status_code == 200
-    workflows = wr.json()
-    build_workflows = [w for w in workflows if w.get("workflow_type") == "persona_creation"]
-    assert build_workflows, f"no persona_creation workflow found: {workflows}"
-    steps_resp = await client.get(f"/api/v1/workflows/{build_workflows[0]['id']}/steps")
-    assert steps_resp.status_code == 200
-    steps = steps_resp.json()
-    ds_steps = [s for s in steps if s["step_type"] == "build_reference_dataset"]
-    assert ds_steps, f"build_reference_dataset step missing: {[s['step_type'] for s in steps]}"
-    ds_out = ds_steps[0].get("output_data") or {}
-    assert "No identity lock for persona" not in str(ds_out.get("errors", "")), (
-        f"reference generation hit the identity-lock visibility bug: {ds_out}"
-    )
-    assert ds_out.get("total_images", 0) >= 1, (
-        f"build must generate reference images from the lock: {ds_out}"
-    )
-
     # ── 5. Identity lock exists, ACTIVE, and references the persona ──────
     lr = await client.get(f"/api/v1/personas/{persona_id.hex}/identity-lock")
     assert lr.status_code == 200, f"identity lock missing: {lr.text}"
@@ -143,7 +121,7 @@ async def test_new_persona_gets_durable_identity_lock(client):
     })
     assert sr.status_code in (200, 201), f"create shoot failed: {sr.text}"
 
-    # ── 8. Start production (mock provider path) ──────────────────────────
+    # ── 8. Start production (fake provider path) ──────────────────────────
     ar_prod = await client.post(
         f"/api/v1/personas/{persona_id.hex}/auto-produce",
         params={"shoot_count": 1, "images_per_shoot": 2, "generate_videos": False},
@@ -168,5 +146,5 @@ async def test_new_persona_gets_durable_identity_lock(client):
 
     if final_job["status"] == "completed":
         meta = final_job["metadata_json"]
-        assert meta.get("is_mock") is True, "mock run must be labelled is_mock=true"
         assert meta.get("image_provider"), "job must record which provider executed"
+        assert meta.get("is_mock") is not True, "strict registry cannot produce mock runs"

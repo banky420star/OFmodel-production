@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models import Fan, ChatMessage, Persona
 from app.chat_engine import generate_chat_reply, _score_fan
+from app.providers.gates import require, CAPABILITY_REQUIREMENTS
 
 router = APIRouter()
 
@@ -142,7 +143,11 @@ async def auto_reply(
     """Generate and send an AI reply to a fan message."""
     from app.chat_engine import generate_chat_reply
     from uuid import uuid4
-    
+
+    # Real providers only — AI replies need a configured LLM. Gated before any
+    # writes so a failed gate leaves the fan record untouched.
+    require(*CAPABILITY_REQUIREMENTS["fan_chat"])
+
     fan = await find_fan(db, fan_id)
     if not fan:
         raise HTTPException(404, "Fan not found")
@@ -261,7 +266,10 @@ async def mass_message(
     """Send a mass message to multiple fans."""
     from app.chat_engine import generate_mass_message
     from uuid import uuid4
-    
+
+    # Real providers only — AI-generated mass messages need a configured LLM.
+    require(*CAPABILITY_REQUIREMENTS["fan_chat"])
+
     persona = await db.get(Persona, persona_id)
     if not persona:
         raise HTTPException(404, "Persona not found")

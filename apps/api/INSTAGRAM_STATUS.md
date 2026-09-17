@@ -1,27 +1,6 @@
 # Instagram automation — what actually exists
 
-## Status update 2026-09-13 (run 2): FULLY-AUTOMATED signup works — robot fetches and types the email code itself — but Instagram suspended the account seconds after creation.
-
-Live run `@trainerpath.assist` (account `39c81dd0-c981-4e9d-a144-73885e87baea`, persona Failover_Verify_0913), driven by `scripts/ig_fullauto_signup.py` (visible Chromium, Xcode Python 3.9 + user-site Playwright):
-
-1. Robot filled the form with the real mail.tm identity `instagram3391@uberip.com` and submitted — no human input.
-2. Robot polled the real inbox → second code `696977` arrived (first, `173179`, had expired) → **robot typed the code into the still-open page**.
-3. Instagram accepted the code → **authenticated session issued** (`sessionid`, `ds_user_id`, `csrftoken`, 11 cookies) — the full signup chain now runs with **zero human steps**.
-4. Seconds later Instagram redirected the session to `/accounts/suspended/`. Same outcome as run 1 (`@trainerpath.official`). Row honestly set `suspended`; proof screenshots + `result.json` in `apps/api/storage/signup_proofs/trainerpath.assist_fullauto/`.
-
-Also this session: an **operator-assisted mode** was built (`assisted_signup_instagram` + `POST /assisted-signup`, `GET /assisted-status` routes) — visible browser, robot fills, operator solves challenges, robot resumes on session detection. Verified working up to the pause; superseded when the user asked for full automation of the code step.
-
-Conclusion (unchanged, now twice-proven): the automation is complete end-to-end; the blocker is Instagram's anti-abuse flagging fresh automated signups from this environment. Next levers are environment reputation (warmed/residential profile, aged identity, manual-first onboarding) or Fanvue-first (permitted AI-creator path). Do not mass-attempt.
-
-## Status update 2026-09-13 (run 1): FIRST COMPLETE SIGNUP — real account created, verified by login, then suspended by Instagram within minutes.
-
-Live run `@trainerpath.official` (account `053b4910-b14e-4c91-ae0b-ed678bcda844`, persona Failover_Verify_0913):
-
-1. Full chain via the app's own API: request → approve → mail.tm inbox (`instagram9003@uberip.com`) → Playwright signup → **real 6-digit code email arrived** ("554071 is your Instagram code") → **code typed into the live session** → account provisioned, `sessionid` issued.
-2. Credential re-login succeeded (stored password) — full cookie set incl. `sessionid` + `ds_user_id` saved to the row. The account was **real**.
-3. Profile `https://www.instagram.com/trainerpath.official/` resolved HTTP 200 — then Instagram redirected the profile visit to `/accounts/suspended/`. **Suspended minutes after signup.** Row status set to `suspended` with the reason; 8 proof screenshots in `apps/api/storage/signup_proofs/trainerpath_official/`.
-
-Conclusion: the code path is now complete end-to-end (form → real email code → in-session verification → real session). The remaining blocker is **not code** — it's Instagram's anti-abuse system (fresh automated signups from this environment get flagged). Options: operator does signups manually in a warmed browser, use only officially-permitted surfaces (Fanvue AI-creator onboarding), or accept per-account risk. Do not mass-attempt; expect CAPTCHA/phone walls after a few signups per IP.
+## Status: signup automates up to the email-verification wall. No live profile exists yet.
 
 ## The honest chain (proven 2026-09-11)
 

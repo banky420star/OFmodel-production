@@ -1,5 +1,9 @@
 """
 Persona Studio — test configuration and fixtures.
+
+The registry is strict (real providers only, no mocks in app/), so tests
+inject the deterministic fakes from tests/fakes.py via force_override(),
+which refuses to run outside ENVIRONMENT=test.
 """
 import asyncio
 import os
@@ -8,13 +12,9 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
-from uuid import uuid4
 from httpx import AsyncClient, ASGITransport
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-
-from fastapi import Depends
-from app.main import app
-from app.database import Base, get_db
+from sqlalchemy import event
 
 # Use a real SQLite file for testing — no external DB required.
 # A file (not :memory:) matters because background tasks (persona build,
@@ -25,15 +25,32 @@ _test_db_file.close()
 TEST_DB_PATH = _test_db_file.name
 TEST_DATABASE_URL = f"sqlite+aiosqlite:///{TEST_DB_PATH}"
 
-# Point the sync identity engine at the same file before any app code runs.
-os.environ["PERSONA_STUDIO_DB"] = TEST_DB_PATH
+# Set env BEFORE app modules import: app.database builds its engine (and
+# AsyncSessionLocal, which the identity engine and workflow engine now share)
+# from settings at import time.
+os.environ["DATABASE_URL"] = TEST_DATABASE_URL
+os.environ["ENVIRONMENT"] = "test"
+
+from app.main import app  # noqa: E402
+from app.database import Base, AsyncSessionLocal, get_db  # noqa: E402
+from app.config import get_settings  # noqa: E402
+from app.providers.registry import get_registry  # noqa: E402
 
 test_engine = create_async_engine(
     TEST_DATABASE_URL,
     echo=False,
-    connect_args={"check_same_thread": False},
+    connect_args={"check_same_thread": False, "timeout": 30},
 )
 TestSessionLocal = async_sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)
+
+
+@event.listens_for(test_engine.sync_engine, "connect")
+def _configure_test_sqlite(dbapi_conn, _connection_record):
+    cursor = dbapi_conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.execute("PRAGMA busy_timeout=30000")
+    cursor.close()
 
 
 @pytest.fixture(scope="session")
@@ -54,18 +71,24 @@ async def setup_db():
     await test_engine.dispose()
 
 
-# Force mock providers for tests (avoid real LLM/image/voice calls)
-os.environ["PROVIDER_REGISTRY"] = "mock"
-from app.providers.registry import reset_registry, get_registry
-from app.config import get_settings
+# Inject the deterministic offline fakes into the strict registry.
+from tests.fakes import (  # noqa: E402
+    FakeLLMProvider, FakeImageProvider, FakeVideoProvider,
+    FakeVoiceProvider, FakeTrainerProvider, FakeStorageProvider,
+)
+
 get_settings.cache_clear()
-reset_registry()
 _registry = get_registry()
-assert _registry._mode == "mock", f"Expected mock, got {_registry._mode}"
+_registry.force_override("llm", FakeLLMProvider())
+_registry.force_override("image", FakeImageProvider())
+_registry.force_override("video", FakeVideoProvider())
+_registry.force_override("voice", FakeVoiceProvider())
+_registry.force_override("trainer", FakeTrainerProvider())
+_registry.force_override("storage", FakeStorageProvider())
 
 
 async def override_get_db():
-    async with TestSessionLocal() as session:
+    async with AsyncSessionLocal() as session:
         try:
             yield session
             await session.commit()
@@ -78,8 +101,8 @@ async def override_get_db():
 app.dependency_overrides[get_db] = override_get_db
 
 # Override the workflow engine's session factory
-from app.workflows.engine import workflow_engine
-workflow_engine._session_factory = TestSessionLocal
+from app.workflows.engine import workflow_engine  # noqa: E402
+workflow_engine._session_factory = AsyncSessionLocal
 
 
 @pytest_asyncio.fixture

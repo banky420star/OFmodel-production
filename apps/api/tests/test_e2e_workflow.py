@@ -1,12 +1,13 @@
 """Persona Studio — Complete End-to-End Workflow Test.
 
-This test runs the ENTIRE mock workflow as specified in the master prompt:
+This test runs the ENTIRE workflow using the deterministic test fakes
+(tests/fakes.py, injected via force_override in ENVIRONMENT=test):
 
     create persona
     → generate identity candidates
     → approve identity
     → build reference dataset
-    → train mock LoRA
+    → train fake LoRA
     → validate identity
     → create voice
     → create shoot
@@ -26,7 +27,7 @@ from uuid import UUID
 
 @pytest.mark.asyncio
 async def test_full_e2e_workflow(client):
-    """The complete Persona Studio workflow — all phases, all mocks."""
+    """The complete Persona Studio workflow — all phases, fake providers."""
 
     # ═══════════════════════════════════════════════════════════════
     # PHASE 1-3: Create Persona
@@ -208,73 +209,65 @@ async def test_full_e2e_workflow(client):
     print(f"  ✓ Autopilot mode: {resp.json()['autopilot']}")
 
     # ═══════════════════════════════════════════════════════════════
-    # PHASE 11: Analytics
+    # PHASE 11: Analytics (de-demo — synthetic generators removed)
     # ═══════════════════════════════════════════════════════════════
     print("\n=== PHASE 11: Analytics ===")
 
     resp = await client.post(f"/api/v1/personas/{persona_id}/analytics/generate")
-    assert resp.status_code == 200
-    print(f"  ✓ Analytics generated: {resp.json()['days']} days")
+    assert resp.status_code == 404, "synthetic analytics generator must not exist"
+    print("  ✓ Demo analytics generator absent (404)")
 
     resp = await client.get(f"/api/v1/personas/{persona_id}/analytics")
     assert resp.status_code == 200
-    analytics = resp.json()
-    assert len(analytics) == 90
-    print(f"  ✓ {len(analytics)} analytics snapshots")
+    print("  ✓ Analytics endpoint serves real data only")
 
     # ═══════════════════════════════════════════════════════════════
-    # PHASE 12: 24-Month Forecast
+    # PHASE 12: 24-Month Forecast (de-demo)
     # ═══════════════════════════════════════════════════════════════
     print("\n=== PHASE 12: 24-Month Forecast ===")
 
     resp = await client.post(f"/api/v1/personas/{persona_id}/forecasts/generate")
-    assert resp.status_code == 200
-    print(f"  ✓ Forecast generated: {resp.json()['horizon_months']} months")
+    assert resp.status_code == 404, "synthetic forecast generator must not exist"
+    print("  ✓ Demo forecast generator absent (404)")
 
     resp = await client.get(f"/api/v1/personas/{persona_id}/forecasts")
     assert resp.status_code == 200
-    forecasts = resp.json()
-    assert len(forecasts) >= 1
-    forecast = forecasts[0]
-    assert len(forecast["scenarios"]) == 3  # conservative, base, aggressive
-    assert len(forecast["scenarios"][0]["monthly_followers"]) == 24
-    print(f"  ✓ 3 scenarios: {', '.join(s['scenario'] for s in forecast['scenarios'])}")
-    print(f"  ✓ 24-month projections for each scenario")
+    print("  ✓ Forecasts endpoint serves real data only")
 
     # ═══════════════════════════════════════════════════════════════
-    # PHASE 5-8: Verify Mock Providers
+    # PHASE 5-8: Verify Fake Providers (test stand-ins)
     # ═══════════════════════════════════════════════════════════════
     print("\n=== PHASE 5-8: Provider Verification ===")
 
-    from app.providers.mocks import (
-        MockImageProvider, MockVideoProvider, MockVoiceProvider, MockTrainerProvider
+    from tests.fakes import (
+        FakeImageProvider, FakeVideoProvider, FakeVoiceProvider, FakeTrainerProvider
     )
 
     # Image
-    img = MockImageProvider()
+    img = FakeImageProvider()
     r = await img.generate(prompt="test", seed=42)
-    assert r.success and r.data["is_mock"]
-    print("  ✓ MockImageProvider working")
+    assert r.success and r.data["image_bytes"]
+    print("  ✓ FakeImageProvider working")
 
     # Video
-    vid = MockVideoProvider()
+    vid = FakeVideoProvider()
     r = await vid.text_to_video(prompt="test")
-    assert r.success and r.data["is_mock"]
-    print("  ✓ MockVideoProvider working")
+    assert r.success and r.data["video_bytes"]
+    print("  ✓ FakeVideoProvider working")
 
     # Voice
-    v = MockVoiceProvider()
+    v = FakeVoiceProvider()
     r = await v.create_voice(name="test")
     assert r.success
     r = await v.synthesize(text="Hello", voice_id=r.data["voice_id"])
-    assert r.success and r.data["is_mock"]
-    print("  ✓ MockVoiceProvider working")
+    assert r.success and r.data["audio_bytes"]
+    print("  ✓ FakeVoiceProvider working")
 
     # Trainer
-    t = MockTrainerProvider()
+    t = FakeTrainerProvider()
     r = await t.train(dataset_id="test")
-    assert r.success and r.data["is_mock"]
-    print("  ✓ MockTrainerProvider working")
+    assert r.success and r.data["model_path"]
+    print("  ✓ FakeTrainerProvider working")
 
     # ═══════════════════════════════════════════════════════════════
     # SUMMARY
@@ -289,6 +282,6 @@ async def test_full_e2e_workflow(client):
     print(f"  Workflows: {len(workflows)}")
     print(f"  QA Results: {len(qa_results)}")
     print(f"  Scheduled Posts: {len(posts)}")
-    print(f"  Analytics Snapshots: {len(analytics)}")
-    print(f"  Forecast Scenarios: {len(forecast['scenarios'])}")
+    print(f"  Analytics endpoint: real-data-only (de-demo verified)")
+    print(f"  Forecast endpoint: real-data-only (de-demo verified)")
     print("=" * 60)

@@ -1,370 +1,370 @@
-"""Persona Studio — Provider Registry.
+"""Persona Production Line — strict provider registry.
 
-Dynamically selects mock or real providers based on configuration.
-This is the central place where provider swapping happens.
+Real providers only. Each capability is explicitly selected in .env
+(LLM_PROVIDER, IMAGE_PROVIDER, ...) and `resolve()` either returns the named
+adapter or raises ProviderNotConfigured. There are no mock providers and no
+fallback cascades: a missing credential is an honest, immediate failure.
 
-Environment variables:
-  PROVIDER_REGISTRY = mock | comfyui | hybrid
-  COMFYUI_URL = http://localhost:8188
-  ELEVENLABS_API_KEY = sk_...
-  WAN_VIDEO_URL = http://localhost:8080
-  OLLAMA_URL = http://localhost:11434
-  INSTAGRAM_ACCESS_TOKEN = EAAG...
-  INSTAGRAM_ACCOUNT_ID = 17841400123456789
+Test seam: `force_override()` (test environment only) lets tests inject the
+fakes from tests/fakes.py without polluting app/.
 """
 
 from __future__ import annotations
+
 import os
-from typing import Type
+from pathlib import Path
 
 from app.providers.base import (
-    LLMProvider, ImageProvider, VideoProvider, VoiceProvider,
-    TrainerProvider, StorageProvider,
+    LLMProvider, ImageProvider, TrainerProvider, StorageProvider,
+    VideoProvider, VoiceProvider,
 )
-from app.providers.mocks import (
-    MockLLMProvider, MockImageProvider, MockVideoProvider,
-    MockVoiceProvider, MockTrainerProvider, MockStorageProvider,
-)
+
+
+class ProviderNotConfigured(Exception):
+    """Raised when a capability's provider is missing or lacks credentials."""
+
+    def __init__(self, capability: str, detail: str = ""):
+        self.capability = capability
+        self.detail = detail
+        super().__init__(f"Provider '{capability}' not configured. {detail}")
 
 
 class ProviderRegistry:
-    """Central registry that provides the correct provider implementation.
+    """Explicit per-capability provider resolution — no fallbacks, no mocks."""
 
-    Usage:
-        registry = ProviderRegistry()
-        image_provider = registry.get_image_provider()
-        result = await image_provider.generate(prompt="...", seed=42)
-    """
-
-    def __init__(self, mode: str = ""):
+    def __init__(self):
         from app.config import get_settings
-        settings = get_settings()
-        self._mode = mode or settings.PROVIDER_REGISTRY
-        self._settings = settings
+        self._settings = get_settings()
         self._instances: dict[str, object] = {}
-        # Runtime errors observed while a provider actually executed (e.g. a
-        # 401 from the image API). Configuration alone can't detect these; the
-        # health report turns them into an honest yellow status.
-        self.last_runtime_errors: dict[str, str] = {}
+        self._overrides: dict[str, object] = {}
 
-    def record_runtime_error(self, kind: str, message: str) -> None:
-        """Record that provider `kind` failed at runtime (latest error kept)."""
-        self.last_runtime_errors[kind] = message
+    # ── resolution ────────────────────────────────────────────────────
 
-    def _get(self, key: str, factory):
-        if key not in self._instances:
-            self._instances[key] = factory()
-        return self._instances[key]
+    def resolve(self, capability: str):
+        """Return the provider instance named by settings, or raise."""
+        if capability in self._overrides:
+            return self._overrides[capability]
+        builder = getattr(self, f"_build_{capability}", None)
+        if builder is None:
+            raise ProviderNotConfigured(capability, f"Unknown capability '{capability}'")
+        if capability not in self._instances:
+            self._instances[capability] = builder()
+        return self._instances[capability]
 
-    def get_llm_provider(self) -> LLMProvider:
-        if self._mode in ("hybrid", "ollama", "openai"):
-            try:
-                from app.providers.ollama_provider import OllamaLLMProvider
-                return self._get("llm", lambda: OllamaLLMProvider(
-                    base_url=self._settings.OLLAMA_URL,
-                    model=self._settings.OLLAMA_MODEL or "qwen3:8b",
-                ))
-            except ImportError:
-                pass
-        return self._get("llm", MockLLMProvider)
+    def resolve_optional(self, capability: str):
+        """Like resolve(), but returns None instead of raising (optional caps)."""
+        try:
+            return self.resolve(capability)
+        except ProviderNotConfigured:
+            return None
 
-    def get_mock_image_provider(self) -> ImageProvider:
-        """Deterministic offline image provider — used as the failover target
-        when a configured real provider fails at runtime."""
-        return self._get("image_mock_fallback", MockImageProvider)
+    def force_override(self, capability: str, instance) -> None:
+        """Test-only override. Refuses outside ENVIRONMENT=test."""
+        from app.config import get_settings
+        if get_settings().ENVIRONMENT != "test":
+            raise RuntimeError("force_override is only allowed in ENVIRONMENT=test")
+        self._overrides[capability] = instance
 
-    def get_image_provider(self) -> ImageProvider:
-        # Mock mode must stay deterministic and offline — no cloud calls even
-        # when API keys happen to be present in the environment.
-        if self._mode == "mock":
-            return self._get("image", MockImageProvider)
-        # Priority 0: EachSense (each::sense) — adult-capable cloud generation;
-        # activates when EACHLABS_API_KEY is set, falls through otherwise
-        if self._settings.EACHLABS_API_KEY:
-            try:
-                from app.providers.eachsense_image import EachSenseImageProvider
-                return self._get("image", lambda: EachSenseImageProvider(
-                    api_key=self._settings.EACHLABS_API_KEY,
-                    mode=self._settings.EACHSENSE_MODE,
-                ))
-            except ImportError:
-                pass
-        # Priority 1: ComfyUI (local GPU) — only if URL is explicitly set
-        if self._mode in ("hybrid", "comfyui") and self._settings.COMFYUI_URL:
-            try:
-                from app.providers.comfyui import ComfyUIImageProvider
-                return self._get("image", lambda: ComfyUIImageProvider(
-                    base_url=self._settings.COMFYUI_URL
-                ))
-            except ImportError:
-                pass
-        # Priority 2: DashScope Qwen-Image (same key as Wan video, up to 2048px)
-        api_key = self._settings.WAN_API_KEY or getattr(self._settings, "DASHSCOPE_API_KEY", "")
-        if api_key:
-            # Priority 2a: Wan 2.5 image (same key as Wan video) — VERIFIED
-            # working on this key (t2i + i2i), unlike qwen-image* which 401s.
-            # i2i is the identity-locked path (avatar as visual reference).
-            try:
-                from app.providers.wan_image import WanImageProvider
-                return self._get("image", lambda: WanImageProvider(api_key=api_key))
-            except ImportError:
-                pass
-            # Priority 2b: DashScope Qwen-Image (401 InvalidApiKey on this key
-            # as of 2026-09-13 — kept only as a legacy fallback target)
-            try:
-                from app.providers.dashscope_image import DashScopeImageProvider
-                return self._get("image", lambda: DashScopeImageProvider(api_key=api_key))
-            except ImportError:
-                pass
-        # Priority 3: HuggingFace Inference API (free, no GPU needed)
-        if self._mode in ("hybrid", "huggingface", "hf"):
-            try:
-                from app.providers.huggingface import HuggingFaceImageProvider
-                return self._get("image", lambda: HuggingFaceImageProvider(
-                    api_key=getattr(self._settings, "HUGGINGFACE_API_KEY", ""),
-                ))
-            except ImportError:
-                pass
-        return self._get("image", MockImageProvider)
+    # ── capability builders (explicit — one env var per capability) ──
 
-    def get_video_provider(self) -> VideoProvider:
-        # DashScope cloud Wan (Alibaba Cloud) — highest priority if API key is set
-        if self._mode in ("hybrid", "wan", "wan_video", "dashscope", "wan_cloud"):
-            api_key = self._settings.WAN_API_KEY or self._settings.DASHSCOPE_API_KEY
-            if api_key:
-                try:
-                    from app.providers.wan_dashscope import DashScopeWanProvider
-                    return self._get("video", lambda: DashScopeWanProvider(api_key=api_key))
-                except ImportError:
-                    pass
-        # Self-hosted Wan server
-        if self._mode in ("hybrid", "wan", "wan_video"):
-            try:
-                from app.providers.wan_video import WanVideoProvider
-                return self._get("video", lambda: WanVideoProvider(
-                    base_url=self._settings.WAN_VIDEO_URL or "http://localhost:8080"
-                ))
-            except ImportError:
-                pass
-        return self._get("video", MockVideoProvider)
+    def _require_env(self, capability: str, value: str, env_name: str, what: str):
+        if not value:
+            raise ProviderNotConfigured(
+                capability,
+                f"Set {what} in .env (IMAGE_PROVIDER is "
+                f"'{getattr(self._settings, capability.upper() + '_PROVIDER', '')}').",
+            )
+        return value
 
-    def get_voice_provider(self) -> VoiceProvider:
-        if self._mode in ("hybrid", "elevenlabs"):
-            try:
-                from app.providers.elevenlabs import ElevenLabsVoiceProvider
-                return self._get("voice", lambda: ElevenLabsVoiceProvider(
-                    api_key=self._settings.ELEVENLABS_API_KEY
-                ))
-            except ImportError:
-                pass
-        return self._get("voice", MockVoiceProvider)
+    def _build_llm(self) -> LLMProvider:
+        if self._settings.LLM_PROVIDER != "ollama":
+            raise ProviderNotConfigured("llm", f"Unknown LLM_PROVIDER '{self._settings.LLM_PROVIDER}'")
+        self._require_env("llm", self._settings.OLLAMA_URL, "", "OLLAMA_URL")
+        from app.providers.ollama_provider import OllamaLLMProvider
+        return OllamaLLMProvider(
+            base_url=self._settings.OLLAMA_URL,
+            model=self._settings.OLLAMA_MODEL or "qwen3:4b",
+        )
 
-    def get_trainer_provider(self) -> TrainerProvider:
-        # Mock mode must stay fully deterministic and fast — the real HF
-        # LoRA trainer takes 5-15 minutes of GPU time per build.
-        if self._mode == "mock":
-            return self._get("trainer", MockTrainerProvider)
-        # HuggingFace LoRA trainer (runs on MPS/CUDA)
+    def _build_image(self) -> ImageProvider:
+        s = self._settings
+        if s.IMAGE_PROVIDER == "dashscope":
+            api_key = s.WAN_API_KEY or s.DASHSCOPE_API_KEY
+            self._require_env("image", api_key, "", "WAN_API_KEY or DASHSCOPE_API_KEY")
+            from app.providers.dashscope_image import DashScopeImageProvider
+            return DashScopeImageProvider(api_key=api_key)
+        if s.IMAGE_PROVIDER == "eachsense":
+            self._require_env("image", s.EACHLABS_API_KEY, "", "EACHLABS_API_KEY")
+            from app.providers.eachsense_image import EachSenseImageProvider
+            return EachSenseImageProvider(api_key=s.EACHLABS_API_KEY, mode=s.EACHSENSE_MODE)
+        if s.IMAGE_PROVIDER == "comfyui":
+            self._require_env("image", s.COMFYUI_URL, "", "COMFYUI_URL")
+            from app.providers.comfyui import ComfyUIImageProvider
+            return ComfyUIImageProvider(base_url=s.COMFYUI_URL, timeout=s.COMFYUI_TIMEOUT)
+        if s.IMAGE_PROVIDER == "huggingface":
+            self._require_env("image", s.HUGGINGFACE_API_KEY, "", "HUGGINGFACE_API_KEY")
+            from app.providers.huggingface import HuggingFaceImageProvider
+            return HuggingFaceImageProvider(api_key=s.HUGGINGFACE_API_KEY)
+        raise ProviderNotConfigured("image", f"Unknown IMAGE_PROVIDER '{s.IMAGE_PROVIDER}'")
+
+    def _build_video(self) -> VideoProvider:
+        s = self._settings
+        if s.VIDEO_PROVIDER == "dashscope_wan":
+            api_key = s.WAN_API_KEY or s.DASHSCOPE_API_KEY
+            self._require_env("video", api_key, "", "WAN_API_KEY or DASHSCOPE_API_KEY")
+            from app.providers.wan_dashscope import DashScopeWanProvider
+            return DashScopeWanProvider(api_key=api_key)
+        if s.VIDEO_PROVIDER == "wan_server":
+            self._require_env("video", s.WAN_VIDEO_URL, "", "WAN_VIDEO_URL")
+            from app.providers.wan_video import WanVideoProvider
+            return WanVideoProvider(base_url=s.WAN_VIDEO_URL or "http://localhost:8080")
+        raise ProviderNotConfigured("video", f"Unknown VIDEO_PROVIDER '{s.VIDEO_PROVIDER}'")
+
+    def _build_voice(self) -> VoiceProvider:
+        s = self._settings
+        if s.VOICE_PROVIDER == "macos_say":
+            from app.providers.macos_voice import MacOSVoiceProvider
+            return MacOSVoiceProvider()
+        if s.VOICE_PROVIDER != "elevenlabs":
+            raise ProviderNotConfigured("voice", f"Unknown VOICE_PROVIDER '{s.VOICE_PROVIDER}'")
+        self._require_env("voice", s.ELEVENLABS_API_KEY, "", "ELEVENLABS_API_KEY")
+        from app.providers.elevenlabs import ElevenLabsVoiceProvider
+        return ElevenLabsVoiceProvider(api_key=s.ELEVENLABS_API_KEY)
+
+    def _build_trainer(self) -> TrainerProvider:
+        s = self._settings
+        if s.TRAINER_PROVIDER != "hf":
+            raise ProviderNotConfigured("trainer", f"Unknown TRAINER_PROVIDER '{s.TRAINER_PROVIDER}'")
         try:
             from app.providers.hf_trainer import HuggingFaceTrainer
-            return self._get("trainer", HuggingFaceTrainer)
-        except ImportError:
-            pass
-        return self._get("trainer", MockTrainerProvider)
+        except ImportError as exc:
+            raise ProviderNotConfigured(
+                "trainer", f"Local LoRA trainer needs torch/diffusers/peft installed ({exc})"
+            )
+        return HuggingFaceTrainer()
+
+    def _build_storage(self) -> StorageProvider:
+        s = self._settings
+        if s.STORAGE_PROVIDER == "filesystem":
+            from app.providers.filesystem_storage import FileSystemStorageProvider
+            return FileSystemStorageProvider()
+        raise ProviderNotConfigured("storage", f"Unknown STORAGE_PROVIDER '{s.STORAGE_PROVIDER}'")
+
+    def _build_moderation(self):
+        if self._settings.MODERATION_PROVIDER != "huggingface":
+            raise ProviderNotConfigured(
+                "moderation", f"Unknown MODERATION_PROVIDER '{self._settings.MODERATION_PROVIDER}'"
+            )
+        self._require_env(
+            "moderation", self._settings.HUGGINGFACE_API_KEY, "", "HUGGINGFACE_API_KEY"
+        )
+        from app.providers.moderation import get_moderator
+        return get_moderator()
+
+    def _build_instagram(self):
+        s = self._settings
+        self._require_env(
+            "instagram",
+            s.INSTAGRAM_ACCESS_TOKEN if s.INSTAGRAM_ACCOUNT_ID else "",
+            "",
+            "INSTAGRAM_ACCESS_TOKEN + INSTAGRAM_ACCOUNT_ID",
+        )
+        from app.providers.instagram import InstagramProvider
+        return InstagramProvider(
+            access_token=s.INSTAGRAM_ACCESS_TOKEN,
+            instagram_account_id=s.INSTAGRAM_ACCOUNT_ID,
+        )
+
+    # ── legacy accessor names (routes still call these) ───────────────
+
+    def get_llm_provider(self) -> LLMProvider:
+        return self.resolve("llm")
+
+    def get_image_provider(self) -> ImageProvider:
+        return self.resolve("image")
+
+    def get_video_provider(self) -> VideoProvider:
+        return self.resolve("video")
+
+    def get_voice_provider(self) -> VoiceProvider:
+        return self.resolve("voice")
+
+    def get_trainer_provider(self) -> TrainerProvider:
+        return self.resolve("trainer")
 
     def get_storage_provider(self) -> StorageProvider:
-        # MinIO storage when available
-        if self._mode in ("hybrid", "minio"):
-            try:
-                from app.storage import MinIOStorageProvider
-                return self._get("storage", MinIOStorageProvider)
-            except (ImportError, Exception):
-                pass
-        # Local filesystem storage (hard drive)
-        try:
-            from app.providers.filesystem_storage import FileSystemStorageProvider
-            return self._get("storage", FileSystemStorageProvider)
-        except (ImportError, Exception):
-            pass
-        return self._get("storage", MockStorageProvider)
+        return self.resolve("storage")
 
     def get_instagram_provider(self):
-        """Get Instagram analytics provider (returns None if not configured)."""
-        token = self._settings.INSTAGRAM_ACCESS_TOKEN
-        account_id = self._settings.INSTAGRAM_ACCOUNT_ID
-        if not token or not account_id:
-            return None
-        try:
-            from app.providers.instagram import InstagramProvider
-            return InstagramProvider(
-                access_token=token,
-                instagram_account_id=account_id,
-            )
-        except ImportError:
-            return None
+        return self.resolve_optional("instagram")
+
+    # ── health & self-check ───────────────────────────────────────────
 
     def health_report(self) -> dict[str, dict]:
-        """Get health status of all configured providers.
+        """Per-capability configuration truth.
 
-        Status is derived from actual configuration — never from whether the
-        provider class instantiated.
-
-        Status vocabulary:
-          green  - a real provider is selected and its credentials/URL are set
-          yellow - adapter exists but credentials/service unavailable
-          red    - configured provider is failing at runtime
-          mock   - the deterministic development provider is in use
+        Status vocabulary is strictly green | yellow | red — the word "mock"
+        can no longer be produced by any code path:
+          green  — provider selected AND its credential/endpoint is set
+          yellow — resolution failed (missing config / local service down)
+          red    — provider resolved but its runtime check failed
         """
-        def _name(instance) -> str:
-            return getattr(instance, "_provider", type(instance).__name__)
-
-        def _is_mock(instance) -> bool:
-            return "mock" in type(instance).__name__.lower()
-
-        llm = self.get_llm_provider()
-        image = self.get_image_provider()
-        video = self.get_video_provider()
-        voice = self.get_voice_provider()
-        trainer = self.get_trainer_provider()
-
         report: dict[str, dict] = {}
-
-        # LLM — Ollama is local and free, so reachability is actually probed.
-        if _is_mock(llm):
-            report["llm"] = {
-                "status": "mock",
-                "provider": _name(llm),
-                "details": "Deterministic mock LLM — no Ollama interaction",
-            }
-        else:
-            reachable = self._probe_ollama()
-            report["llm"] = {
-                "status": "green" if reachable else "yellow",
-                "provider": _name(llm),
-                "details": (
-                    f"Ollama reachable at {self._settings.OLLAMA_URL}"
-                    if reachable
-                    else f"Ollama not reachable at {self._settings.OLLAMA_URL}"
-                ),
-            }
-
-        # Image — real providers are cloud APIs; probing them would spend
-        # quota, so health is key-configuration truth, not a live call.
-        # The key check must match the provider the cascade actually selected:
-        # an adapter with an empty key is yellow, never green.
-        if _is_mock(image):
-            report["image"] = {
-                "status": "mock",
-                "provider": _name(image),
-                "details": "Deterministic mock image provider",
-            }
-        else:
-            image_key: str = ""
-            if "eachsense" in _name(image).lower():
-                image_key = self._settings.EACHLABS_API_KEY
-            elif "comfyui" in _name(image).lower():
-                image_key = self._settings.COMFYUI_URL
-            elif "dashscope" in _name(image).lower():
-                image_key = self._settings.WAN_API_KEY or getattr(self._settings, "DASHSCOPE_API_KEY", "")
-            elif "huggingface" in _name(image).lower():
-                image_key = getattr(self._settings, "HUGGINGFACE_API_KEY", "")
-            runtime_err = self.last_runtime_errors.get("image", "")
-            if runtime_err:
-                report["image"] = {
+        for capability in ("llm", "image", "video", "voice", "trainer", "storage", "moderation"):
+            try:
+                instance = self.resolve(capability)
+            except ProviderNotConfigured as exc:
+                report[capability] = {
                     "status": "yellow",
-                    "provider": _name(image),
-                    "details": f"Configured but failing at runtime — {runtime_err}",
+                    "provider": None,
+                    "configured": False,
+                    "detail": str(exc),
+                    "env_hint": _ENV_HINTS.get(capability, ""),
                 }
-            elif image_key:
-                report["image"] = {
-                    "status": "green",
-                    "provider": _name(image),
-                    "details": "Real image provider configured",
+                continue
+            except Exception as exc:
+                report[capability] = {
+                    "status": "red",
+                    "provider": None,
+                    "configured": False,
+                    "detail": str(exc),
+                    "env_hint": _ENV_HINTS.get(capability, ""),
                 }
+                continue
+            report[capability] = {
+                "status": "green",
+                "provider": type(instance).__name__,
+                "configured": True,
+                "detail": f"{type(instance).__name__} ready",
+                "env_hint": "",
+            }
+
+        # LLM gets a real reachability probe (local + free).
+        if report["llm"]["status"] == "green":
+            if self._probe_ollama():
+                report["llm"]["detail"] = f"Ollama reachable at {self._settings.OLLAMA_URL}"
             else:
-                report["image"] = {
-                    "status": "yellow",
-                    "provider": _name(image),
-                    "details": "Image adapter active but its credential/URL is not set",
-                }
+                report["llm"].update(
+                    status="yellow",
+                    detail=f"Ollama not reachable at {self._settings.OLLAMA_URL} — start it or check OLLAMA_URL",
+                )
 
-        # Video
-        if _is_mock(video):
-            report["video"] = {
-                "status": "mock",
-                "provider": _name(video),
-                "details": "Deterministic mock video provider",
-            }
-        else:
-            wan_key = bool(self._settings.WAN_API_KEY or self._settings.DASHSCOPE_API_KEY)
-            report["video"] = {
-                "status": "green" if wan_key else "yellow",
-                "provider": _name(video),
-                "details": (
-                    "DashScope Wan configured"
-                    if wan_key
-                    else "Self-hosted Wan endpoint configured (no API key)"
-                ),
-            }
+        # A local Wan adapter is only operational when its server responds.
+        # Cloud adapters have credential checks in their own builder.
+        if report["video"]["status"] == "green" and self._settings.VIDEO_PROVIDER == "wan_server":
+            try:
+                import httpx
+                response = httpx.get(
+                    f"{self._settings.WAN_VIDEO_URL.rstrip('/')}/health",
+                    timeout=2.0,
+                )
+                if response.status_code != 200:
+                    report["video"].update(
+                        status="yellow",
+                        detail=f"Wan video server returned HTTP {response.status_code}",
+                    )
+                else:
+                    report["video"]["detail"] = (
+                        f"Wan video server reachable at {self._settings.WAN_VIDEO_URL}"
+                    )
+            except Exception:
+                report["video"].update(
+                    status="yellow",
+                    detail=f"Wan video server not reachable at {self._settings.WAN_VIDEO_URL}",
+                )
 
-        # Voice
-        if _is_mock(voice):
-            report["voice"] = {
-                "status": "mock",
-                "provider": _name(voice),
-                "details": "Deterministic mock voice provider",
-            }
-        elif self._settings.ELEVENLABS_API_KEY:
-            report["voice"] = {
-                "status": "green",
-                "provider": _name(voice),
-                "details": "ElevenLabs configured",
-            }
-        else:
-            report["voice"] = {
-                "status": "yellow",
-                "provider": _name(voice),
-                "details": "No credentials configured",
-            }
+        if report["image"]["status"] == "green" and self._settings.IMAGE_PROVIDER == "comfyui":
+            try:
+                import httpx
+                response = httpx.get(
+                    f"{self._settings.COMFYUI_URL.rstrip('/')}/system_stats",
+                    timeout=2.0,
+                )
+                if response.status_code != 200:
+                    report["image"].update(
+                        status="yellow",
+                        detail=f"ComfyUI returned HTTP {response.status_code}",
+                    )
+                else:
+                    models = httpx.get(
+                        f"{self._settings.COMFYUI_URL.rstrip('/')}/object_info",
+                        timeout=2.0,
+                    )
+                    checkpoints = (
+                        models.json()
+                        .get("CheckpointLoaderSimple", {})
+                        .get("input", {})
+                        .get("required", {})
+                        .get("ckpt_name", [[], {}])[0]
+                    ) if models.status_code == 200 else []
+                    expected_checkpoint = self._settings.COMFYUI_CHECKPOINT
+                    if expected_checkpoint not in checkpoints:
+                        report["image"].update(
+                            status="yellow",
+                            detail=(
+                                f"ComfyUI is reachable, but checkpoint "
+                                f"{expected_checkpoint!r} is not installed. Add it under "
+                                ".local/ComfyUI/models/checkpoints or set "
+                                "COMFYUI_CHECKPOINT to an installed compatible file."
+                            ),
+                        )
+                    else:
+                        report["image"]["detail"] = (
+                            f"ComfyUI reachable at {self._settings.COMFYUI_URL} "
+                            f"(checkpoint: {expected_checkpoint})"
+                        )
+            except Exception:
+                report["image"].update(
+                    status="yellow",
+                    detail=f"ComfyUI not reachable at {self._settings.COMFYUI_URL}",
+                )
 
-        # Trainer — the HF LoRA trainer runs locally when torch is importable
-        if _is_mock(trainer):
-            report["trainer"] = {
-                "status": "mock",
-                "provider": _name(trainer),
-                "details": "Deterministic mock trainer",
-            }
-        else:
-            report["trainer"] = {
-                "status": "green",
-                "provider": _name(trainer),
-                "details": "Local LoRA training available",
-            }
+        if report["trainer"]["status"] == "green":
+            cache_root = Path(
+                os.getenv("HF_HOME", Path.home() / ".cache" / "huggingface")
+            )
+            model_cache = cache_root / "hub" / "models--runwayml--stable-diffusion-v1-5"
+            if not model_cache.exists():
+                report["trainer"].update(
+                    status="yellow",
+                    detail=(
+                        "Trainer dependencies are installed, but the base model is not cached. "
+                        "The first training run will download runwayml/stable-diffusion-v1-5."
+                    ),
+                )
 
-        # Storage — local filesystem, always available
-        storage = self.get_storage_provider()
-        report["storage"] = {
-            "status": "mock" if _is_mock(storage) else "green",
-            "provider": _name(storage),
-            "details": "Local filesystem storage" if not _is_mock(storage) else "Mock storage",
-        }
-
-        # Instagram — optional
-        ig = self.get_instagram_provider()
-        if ig:
+        # Instagram is optional.
+        try:
+            self.resolve("instagram")
             report["instagram"] = {
-                "status": "green",
-                "provider": "instagram_graph_api",
-                "details": f"Account {self._settings.INSTAGRAM_ACCOUNT_ID[:8]}…",
+                "status": "green", "provider": "InstagramProvider",
+                "configured": True, "detail": "Graph API analytics configured",
             }
-        else:
+        except ProviderNotConfigured as exc:
             report["instagram"] = {
-                "status": "yellow",
-                "provider": "instagram_graph_api",
-                "details": "Not configured",
+                "status": "yellow", "provider": None, "configured": False,
+                "detail": str(exc), "env_hint": "INSTAGRAM_ACCESS_TOKEN + INSTAGRAM_ACCOUNT_ID (optional)",
             }
 
         return report
+
+    def startup_selfcheck(self) -> list[dict]:
+        """One line per capability, for the startup log and /system/providers."""
+        report = self.health_report()
+        rows = []
+        for capability, info in report.items():
+            rows.append({
+                "capability": capability,
+                "provider": info.get("provider"),
+                "status": info["status"],
+                "configured": info.get("configured", False),
+                "detail": info.get("detail", ""),
+                "env_hint": info.get("env_hint", ""),
+            })
+        return rows
+
+    def required_capabilities(self) -> tuple[str, ...]:
+        return ("llm", "image", "video", "voice", "trainer", "storage", "moderation")
 
     def _probe_ollama(self) -> bool:
         """Cheap reachability probe for the local Ollama server."""
@@ -375,6 +375,18 @@ class ProviderRegistry:
             return resp.status_code == 200
         except Exception:
             return False
+
+
+_ENV_HINTS = {
+    "llm": "OLLAMA_URL / OLLAMA_MODEL",
+    "image": "WAN_API_KEY or DASHSCOPE_API_KEY (IMAGE_PROVIDER=dashscope)",
+    "video": "WAN_API_KEY / DASHSCOPE_API_KEY or WAN_VIDEO_URL",
+    "voice": "ELEVENLABS_API_KEY or macOS say + ffmpeg",
+    "trainer": "install torch/diffusers/peft (TRAINER_PROVIDER=hf)",
+    "storage": "STORAGE_PROVIDER=filesystem|minio",
+    "moderation": "HUGGINGFACE_API_KEY",
+    "instagram": "INSTAGRAM_ACCESS_TOKEN + INSTAGRAM_ACCOUNT_ID",
+}
 
 
 # Singleton registry

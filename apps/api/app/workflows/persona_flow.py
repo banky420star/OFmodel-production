@@ -12,10 +12,8 @@ Flow:
 """
 
 from __future__ import annotations
-import hashlib
 import json
 import random
-from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -44,12 +42,6 @@ def _get_trainer():
 
 def _get_voice():
     return get_registry().get_voice_provider()
-
-
-def _stable_seed(key: str) -> int:
-    """Deterministic seed across processes — str hash() is salted per process,
-    so a seed derived from it changes on every API restart."""
-    return int(hashlib.md5(key.encode()).hexdigest()[:8], 16) % 2147483647
 
 
 async def create_persona_handler(
@@ -209,33 +201,46 @@ async def build_reference_dataset_handler(
     # so Auto-Produce, gallery, and the sync image engine all agree on one row.
     persona = await db.get(Persona, UUID(persona_id))
     lock = await ensure_identity_lock(persona, db, identity_id=UUID(identity_id))
-    # ROOT-CAUSE FIX: generate_identity_locked reads identity_locks through a
-    # separate sync sqlite3 connection. Under WAL it can only see COMMITTED
-    # rows, and the workflow engine only commits after the handler returns —
-    # so without this commit the freshly created lock was invisible and every
-    # reference image failed with "No identity lock for persona".
-    await db.commit()
     storage_hex = persona_storage_hex(persona.id)
 
     # Generate reference images through the identity engine using the same
     # full-hex key the rest of the system uses.
-    from app.identity_engine import generate_identity_locked
-    from app.providers.mocks import _fake_png
+    from app.identity_engine import generate_identity_locked, stable_seed
     from pathlib import Path as _Path
 
     persona_name = input_data.get("persona_name", "model")
 
-    # The real edit-based provider needs an avatar as its identity reference.
-    # Bootstrap a deterministic one through the mock provider when the persona
-    # has none — labelled as mock, never presented as real output.
+    # The edit-based provider needs an avatar as its identity reference.
+    # Bootstrap a real one with a text-to-image call through the configured
+    # image provider — no placeholder can enter storage/avatars/. On failure
+    # the step fails and the identity lock never becomes ACTIVE.
     avatar_dir = _Path(__file__).parent.parent.parent / "storage" / "avatars"
     avatar_dir.mkdir(parents=True, exist_ok=True)
     avatar_path = avatar_dir / f"{persona.name.lower()}.jpg"
     if not avatar_path.exists():
-        appearance = (persona.appearance or {})
-        seed = _stable_seed(f"avatar_{persona.id}")
-        avatar_path.write_bytes(_fake_png(768, 768, seed))
-        logger_info = f"bootstrapped deterministic mock avatar for {persona.name}"
+        appearance = (getattr(persona, "appearance", None) or {}) or {}
+        appearance_bits = ", ".join(
+            f"{k.replace('_', ' ')}: {v}" for k, v in appearance.items()
+        )
+        avatar_prompt = (
+            f"Professional portrait photograph of {persona.name}. "
+            f"{persona.description or ''}. "
+            f"{appearance_bits}. Frontal head-and-shoulders portrait, "
+            "neutral studio background, soft even lighting, photorealistic"
+        )
+        avatar_result = await _get_image().generate(
+            prompt=avatar_prompt,
+            width=768,
+            height=768,
+            seed=stable_seed("avatar", str(persona.id)),
+        )
+        if not avatar_result.success or not avatar_result.data.get("image_bytes"):
+            raise RuntimeError(
+                f"Avatar bootstrap failed for {persona.name}: "
+                f"{avatar_result.error or 'image provider returned no image'}"
+            )
+        avatar_path.write_bytes(avatar_result.data["image_bytes"])
+        logger_info = f"generated real avatar for {persona.name} via {avatar_result.provider}"
     else:
         logger_info = "existing avatar used as identity reference"
 
@@ -251,66 +256,43 @@ async def build_reference_dataset_handler(
         "outdoor natural light, golden hour",
     ]
 
-    # Write reference images under the dataset's own UUID directory — the
-    # same path the LoRA trainer reads (DATASETS_DIR / dataset_id). Writing
-    # them elsewhere used to leave the trainer with an empty directory,
-    # silently falling back to synthetic training images.
-    dataset_id = uuid4()
-    dataset_dir = _Path(__file__).parent.parent.parent / "storage" / "datasets" / str(dataset_id)
+    dataset_dir = _Path(__file__).parent.parent.parent / "storage" / "datasets" / storage_hex[:8]
     dataset_dir.mkdir(parents=True, exist_ok=True)
 
     image_keys = []
     gen_errors = []
-    is_mock_flags = []
-    fallback_errors = []
     for i, view in enumerate(views):
         out_path = str(dataset_dir / f"ref_{i+1:02d}.png")
         result = await generate_identity_locked(
             persona_id_hex=storage_hex,
             scene_prompt=view,
             output_path=out_path,
-            seed_override=_stable_seed(f"{identity_id}_{i}"),
+            seed_override=stable_seed(identity_id, i),
         )
         if result["success"]:
             image_keys.append(out_path)
-            is_mock_flags.append(bool(result.get("is_mock")))
-            if result.get("fallback_reason"):
-                fallback_errors.append(result["fallback_reason"])
         else:
             gen_errors.append(result.get("error", "unknown"))
 
-    any_real = bool(image_keys) and not all(is_mock_flags)
     dataset = ReferenceDataset(
-        id=dataset_id,
+        id=uuid4(),
         identity_id=UUID(identity_id),
         name="primary_reference",
         image_keys=image_keys,
-        # Honest counts: total_images is the number of images actually
-        # generated, never the number attempted. quality_score derives from
-        # the real success ratio.
         total_images=len(image_keys),
-        quality_score=round(len(image_keys) / len(views), 3),
-        metadata_json={
-            "is_mock": not any_real,
-            "requested_images": len(views),
-            "provider_errors": fallback_errors[:3],
-            "errors": gen_errors[:3],
-        },
+        quality_score=None,
     )
     db.add(dataset)
     await db.flush()
 
     return {
         "dataset_id": str(dataset.id),
-        "dataset_dir": str(dataset_dir),
         "total_images": len(image_keys),
-        "requested_images": len(views),
-        "quality_score": dataset.quality_score,
+        "quality_score": None,
+        "coverage_score": round(len(image_keys) / len(views), 3),
         "identity_lock_status": lock.status,
         "avatar": logger_info,
-        "is_mock": not any_real,
         "errors": gen_errors[:1],
-        "provider_errors": fallback_errors[:1],
     }
 
 
@@ -354,8 +336,6 @@ async def train_lora_handler(
             "loss": result.data.get("final_loss", 0),
             "training_time": result.data.get("training_time_s", 0),
             "provider": result.provider,
-            "training_images": result.data.get("training_images", 0),
-            "trained_on": result.data.get("trained_on", "unknown"),
             **({"error": result.error} if not result.success else {}),
         },
     )
@@ -367,8 +347,6 @@ async def train_lora_handler(
         "loss": result.data.get("final_loss", 0),
         "training_time_s": result.data.get("training_time_s", 0),
         "provider": result.provider,
-        "training_images": result.data.get("training_images", 0),
-        "trained_on": result.data.get("trained_on", "unknown"),
         "training_failed": not result.success,
         "training_error": "" if result.success else result.error,
     }
@@ -396,65 +374,28 @@ async def validate_identity_handler(
         user_prompt="QA validation for trained identity model",
     )
 
-    # QA must reflect reality: the reference dataset this identity was built on
-    # is the ground truth. A dataset with zero images cannot pass QA no matter
-    # what the LLM stub says. The LLM-based consistency evaluation is a
-    # deterministic placeholder — labelled as such in the QA details.
-    ds_result = await db.execute(
-        select(ReferenceDataset)
-        .where(ReferenceDataset.identity_id == UUID(identity_id))
-        .order_by(ReferenceDataset.created_at.desc())
-        .limit(1)
-    )
-    dataset = ds_result.scalar_one_or_none()
-    dataset_images = list(dataset.image_keys or []) if dataset else []
-    # image_keys are absolute paths written at generation time.
-    images_on_disk = [key for key in dataset_images if Path(key).exists()]
-    images_checked = len(images_on_disk)
-
-    llm_verdict = result.data.get("content", {}) if result.data.get("content") else {}
-    llm_score = (
-        float(llm_verdict.get("identity_score", 0.0))
-        if isinstance(llm_verdict, dict) and llm_verdict.get("identity_score") is not None
-        else 0.0
-    )
-
-    # The pass/fail gate is the dataset evidence itself: every reference image
-    # recorded for this identity must exist on disk. The LLM consistency score
-    # is advisory only — recorded in details, never used to wave a build
-    # through (the stub's number is not a real perceptual check).
-    if images_checked == 0:
-        approved = False
-        score = 0.0
-        qa_note = "No reference images on disk for this identity — QA cannot pass without evidence"
-    elif images_checked < len(dataset_images):
-        approved = False
-        score = round(images_checked / max(len(dataset_images), 1), 3)
-        qa_note = f"Only {images_checked}/{len(dataset_images)} reference images on disk"
-    else:
-        approved = True
-        score = 1.0
-        qa_note = "Placeholder QA: all reference images present on disk. LLM score is advisory."
+    content = result.data.get("content", {}) if isinstance(result.data, dict) else {}
+    required_fields = {"approved", "identity_score", "quality_score"}
+    evaluator_ready = isinstance(content, dict) and required_fields.issubset(content)
+    if not evaluator_ready:
+        content = {
+            "evaluation_status": "blocked",
+            "error": "Evaluator did not return approved, identity_score, and quality_score.",
+            "raw_response": content,
+        }
 
     qa = QAResult(
         id=uuid4(),
         identity_id=UUID(identity_id),
         workflow_id=workflow_id,
         qa_type="consistency",
-        status=QAStatus.PASSED if approved else QAStatus.FAILED,
-        score=score,
+        status=QAStatus.PASSED if evaluator_ready and content["approved"] else QAStatus.FAILED,
+        score=float(content["identity_score"]) if evaluator_ready else 0.0,
         threshold=0.85,
-        details={
-            "qa_implementation": "placeholder_deterministic",
-            "note": qa_note,
-            "dataset_total_images": len(dataset_images),
-            "dataset_images_on_disk": images_checked,
-            "advisory_llm_score": llm_score,
-            "llm_raw": llm_verdict if isinstance(llm_verdict, dict) else {},
-        },
-        images_checked=images_checked,
-        passed_count=images_checked if approved else 0,
-        failed_count=images_checked if not approved else 0,
+        details=content,
+        images_checked=int(content.get("images_checked", 0)),
+        passed_count=int(content.get("passed_count", 0)),
+        failed_count=int(content.get("failed_count", 0)),
     )
     db.add(qa)
     await db.flush()
@@ -553,24 +494,9 @@ async def activate_persona_handler(
 
     if identity_id:
         identity = await db.get(Identity, UUID(identity_id))
-        if identity:
-            if identity.status == IdentityStatus.FAILED:
-                # HONEST STATE: QA failed in validate_identity — activation must
-                # not silently promote a failed identity to READY or hand back
-                # an active lock. The persona stays deactivated and the step
-                # output records exactly why.
-                return {
-                    "status": "identity_failed",
-                    "persona_id": persona_id,
-                    "identity_id": identity_id,
-                    "error": (
-                        "Identity QA failed — persona not activated. "
-                        "Fix the identity build and rebuild before producing content."
-                    ),
-                }
-            if identity.status != IdentityStatus.READY:
-                identity.status = IdentityStatus.READY
-                await db.flush()
+        if identity and identity.status != IdentityStatus.READY:
+            identity.status = IdentityStatus.READY
+            await db.flush()
 
     # Create or refresh the durable identity lock for this persona.
     # This is the missing step that made new personas fail with

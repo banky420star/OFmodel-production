@@ -143,20 +143,10 @@ class HuggingFaceTrainer(TrainerProvider):
         )
 
         if not image_files:
-            # Truthful fallback: label the run so downstream steps and the UI
-            # can never mistake synthetic training data for the identity's
-            # real reference set.
-            trained_on = "synthetic_fallback"
-            logger.warning(
-                "no_reference_images",
-                dataset_id=dataset_id,
-                dataset_path=str(dataset_path),
-                action="training_on_synthetic_fallback",
+            raise ValueError(
+                f"No reference images found for dataset '{dataset_id}'. "
+                "Add at least one licensed PNG or JPEG before starting LoRA training."
             )
-            dataset_path.mkdir(parents=True, exist_ok=True)
-            image_files = self._generate_synthetic_images(dataset_path, count=8)
-        else:
-            trained_on = "reference_images"
 
         logger.info("loaded_dataset", images=len(image_files), path=str(dataset_path))
 
@@ -309,48 +299,8 @@ class HuggingFaceTrainer(TrainerProvider):
             "total_steps": steps,
             "device": self._device,
             "base_model": self._base_model,
-            "training_images": len(image_files),
-            "trained_on": trained_on,
         }
 
-    def _generate_synthetic_images(self, output_dir: Path, count: int = 8) -> list[Path]:
-        """Generate synthetic reference images for training when none exist."""
-        from PIL import Image, ImageDraw
-        import random
-
-        paths = []
-        for i in range(count):
-            # Create a simple gradient portrait-like image
-            img = Image.new("RGB", (512, 512))
-            draw = ImageDraw.Draw(img)
-
-            # Random skin tone background
-            skin = (random.randint(180, 240), random.randint(150, 200), random.randint(130, 180))
-            draw.rectangle([0, 0, 512, 512], fill=skin)
-
-            # Face oval
-            face_color = (
-                min(255, skin[0] + 10),
-                min(255, skin[1] + 5),
-                min(255, skin[2] + 5),
-            )
-            draw.ellipse([128, 80, 384, 400], fill=face_color)
-
-            # Eyes
-            eye_y = 200
-            draw.ellipse([170, eye_y, 210, eye_y + 20], fill="white")
-            draw.ellipse([300, eye_y, 340, eye_y + 20], fill="white")
-            draw.ellipse([180, eye_y + 3, 200, eye_y + 17], fill=(50, 80, 120))
-            draw.ellipse([310, eye_y + 3, 330, eye_y + 17], fill=(50, 80, 120))
-
-            # Mouth
-            draw.arc([200, 280, 312, 340], 0, 180, fill=(180, 80, 80), width=2)
-
-            path = output_dir / f"ref_{i:03d}.png"
-            img.save(path)
-            paths.append(path)
-
-        return paths
 
     async def validate(
         self,
@@ -422,11 +372,16 @@ class HuggingFaceTrainer(TrainerProvider):
             torch.cuda.empty_cache()
 
         return {
-            "validation_score": 0.92,
-            "identity_similarity": 0.90,
-            "quality_score": 0.88,
+            "validation_score": None,
+            "identity_similarity": None,
+            "quality_score": None,
             "images_validated": len(validation_images),
-            "passed": True,
+            "passed": False,
+            "evaluation_status": "not_scored",
+            "error": (
+                "Generated validation image saved, but identity and quality were not "
+                "measured. Review the image manually or configure a real evaluator."
+            ),
             "test_image": str(test_path),
             "is_mock": False,
         }
