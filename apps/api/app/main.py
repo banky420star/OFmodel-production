@@ -14,11 +14,11 @@ from fastapi.responses import FileResponse, JSONResponse
 from pathlib import Path
 import structlog
 
+from app import paths
 from app.config import get_settings
 from app.database import init_db, AsyncSessionLocal
 from app.models import Job
 from app.routes import router
-from app.routes_jobs import router as jobs_router
 from sqlalchemy import update
 
 settings = get_settings()
@@ -66,8 +66,19 @@ async def lifespan(application: FastAPI):
             )
         logger.warning("providers_unresolved", capabilities=unresolved)
 
+    # The clock. Off unless SCHEDULER_ENABLED — see app/scheduler.py. Started
+    # after the provider self-check so its first tick sees the same registry
+    # state the rest of the app booted with.
+    from app import scheduler
+    if await scheduler.start():
+        logger.info("scheduler_armed", interval=scheduler.status()["interval_seconds"])
+    else:
+        logger.info("scheduler_disabled", detail="SCHEDULER_ENABLED is false")
+
     yield
-    # Shutdown: nothing needed
+
+    # Shutdown: stop the clock before the loop closes.
+    await scheduler.stop()
 
 
 app = FastAPI(
@@ -94,10 +105,9 @@ app.add_middleware(
 )
 
 app.include_router(router, prefix="/api/v1")
-app.include_router(jobs_router, prefix="/api/v1")
 
 # Avatar static files
-AVATARS_DIR = Path(__file__).parent.parent / "storage" / "avatars"
+AVATARS_DIR = paths.AVATAR_DIR
 
 
 @app.get("/api/v1/avatars/{filename}")
@@ -118,7 +128,7 @@ async def serve_avatar(filename: str):
 
 
 # Gallery images
-GALLERY_DIR = Path(__file__).parent.parent / "storage" / "gallery"
+GALLERY_DIR = paths.GALLERY_DIR
 
 
 @app.get("/api/v1/gallery/{filename}")
@@ -139,7 +149,7 @@ async def serve_gallery(filename: str):
 
 
 # Generated videos
-VIDEOS_DIR = Path(__file__).parent.parent / "storage" / "videos"
+VIDEOS_DIR = paths.VIDEOS_DIR
 
 
 @app.get("/api/v1/media/videos/{filename}")
@@ -160,7 +170,7 @@ async def serve_video(filename: str):
 
 
 # Shoot images
-SHOOTS_DIR = Path(__file__).parent.parent / "storage" / "shoots"
+SHOOTS_DIR = paths.SHOOT_DIR
 
 
 @app.get("/api/v1/shoots/{shoot_id}/images/{filename}")
@@ -181,7 +191,7 @@ async def serve_shoot_image(shoot_id: str, filename: str):
 # Age-confirmation cookie gate: content is only served to requests carrying
 # the HttpOnly `adult_verified` cookie set by POST /api/v1/gate/age-confirm.
 # Without it the route answers 410 regardless of file existence (no leak).
-ADULT_DIR = Path(__file__).parent.parent / "storage" / "adult_content"
+ADULT_DIR = paths.ADULT_CONTENT_DIR
 ADULT_COOKIE = "adult_verified"
 
 

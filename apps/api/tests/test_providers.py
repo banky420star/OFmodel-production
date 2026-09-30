@@ -113,3 +113,42 @@ async def test_all_providers_health_check():
         p = Provider()
         result = await p.health_check()
         assert result.success
+
+
+# ── the selector fields must exist ───────────────────────────────────
+
+def test_every_capability_selector_is_a_real_setting():
+    """A `<CAPABILITY>_PROVIDER` field that does not exist reports as a red
+    capability, not as a config error.
+
+    This happened: `STORAGE_PROVIDER` was typed onto the tail of the previous
+    line's `#` comment in config.py, so the class attribute was never created.
+    `Settings` does not validate unknown env names into existence the way it
+    would a declared field, and the registry reaches its selector through
+    `getattr(..., capability.upper() + "_PROVIDER")` — so storage resolved to
+    None and `/health` showed `storage  red  None  'Settings' object has no
+    attribute 'STORAGE_PROVIDER'`. Nothing at import time objects, a `.env`
+    STORAGE_PROVIDER is silently ignored, and the symptom looks like a broken
+    backend rather than a typo.
+
+    Pinning the names against `required_capabilities()` means a new capability
+    cannot land in the registry without its selector existing here too.
+    """
+    from app.config import Settings
+    from app.providers.registry import ProviderRegistry
+
+    settings = Settings()
+    registry = ProviderRegistry()
+    assert set(registry.required_capabilities()) == {
+        "llm", "image", "video", "voice", "trainer", "storage", "moderation",
+    }, "the capability list moved — update this test's expectation deliberately"
+
+    for capability in registry.required_capabilities():
+        field = capability.upper() + "_PROVIDER"
+        assert field in Settings.model_fields, (
+            f"{field} is not a field on Settings — the registry reads it via "
+            "getattr() and the capability will report red instead of raising"
+        )
+        assert getattr(settings, field) != "", (
+            f"{field} exists but is empty; the capability cannot resolve"
+        )

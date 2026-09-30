@@ -26,6 +26,13 @@ from app.providers.registry import get_registry
 
 router = APIRouter()
 
+
+def _integrity_report():
+    """Imported lazily so this module does not pull in the billing package at
+    import time — the ledger is only reachable from one endpoint here."""
+    from app.billing.ledger import integrity_report
+    return integrity_report
+
 @router.get("/workflows", response_model=list[WorkflowResponse])
 async def list_workflows(
     persona_id: UUID | None = None,
@@ -52,6 +59,26 @@ async def get_workflow_steps(workflow_id: UUID, db: AsyncSession = Depends(get_d
         select(WorkflowStep).where(WorkflowStep.workflow_id == workflow_id).order_by(WorkflowStep.order)
     )
     return result.scalars().all()
+
+
+@router.post("/workflows/{workflow_id}/cancel")
+async def cancel_workflow(workflow_id: UUID):
+    """Cancel a workflow stuck in RUNNING.
+
+    A step that never returns (e.g. a provider call with no outer timeout) leaves
+    the workflow RUNNING forever, which then blocks /personas/{id}/rebuild with a
+    409 "already running". This is the escape hatch. Retry is not offered here:
+    /personas/{id}/rebuild already re-runs the whole build from the start.
+    """
+    from app.workflows.engine import workflow_engine
+
+    try:
+        workflow = await workflow_engine.cancel_workflow(workflow_id)
+    except ValueError as exc:  # unknown id, or already COMPLETED/CANCELLED
+        raise HTTPException(409, str(exc)) from exc
+
+    status = getattr(workflow.status, "value", workflow.status)
+    return {"id": str(workflow.id), "status": str(status)}
 
 
 # ─── Jobs (Phase 13) ─────────────────────────────────────────────────
@@ -144,13 +171,41 @@ async def system_providers():
 
     Each row: capability, selected provider, status (green|yellow|red),
     plain-language detail, and the env var to fix when not configured.
+
+    `gates` reports the adult-content gate separately: it is not a capability
+    and does not fail a self-check, but its two layers can disagree and one of
+    them is a declaration nothing verifies, so the operator should be able to
+    read its state instead of inferring it.
     """
+    from app.providers.gates import adult_gate_status
+
     registry = get_registry()
     rows = registry.startup_selfcheck()
     return {
         "capabilities": rows,
         "required": list(registry.required_capabilities()),
+        "gates": {"adult": adult_gate_status()},
     }
+
+
+@router.get("/system/ledger/integrity")
+async def ledger_integrity(db: AsyncSession = Depends(get_db)):
+    """Recompute every wallet from the ledger entries and report any drift.
+
+    This is the money equivalent of `reconcile_identity_locks`: it does not
+    trust `wallets.balance_minor`, it recomputes it from the double-entry
+    postings and compares. `balanced: true` means three things at once — every
+    transaction's debits equal its credits, no wallet has drifted from its
+    entries, and the account codes referenced all exist.
+
+    Like the rest of `/system/*`, this is on the unauthenticated operator API.
+    It exposes totals and ids, not fan identities. See the plan's risk 1: the
+    whole operator surface must not be reachable off-localhost until it is
+    moved behind `require_user`.
+    """
+    report = await _integrity_report()(db)
+    return report
+
 
 # Styles and Health
 @router.get("/styles")

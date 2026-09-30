@@ -67,7 +67,10 @@ async def _run_job(
                 job.status = "failed"
                 job.message = f"Job exceeded {timeout}s timeout"
                 await db.commit()
-        logger.error("job_timeout", job_type=job_type, job_id=str(job_id))
+        logger.error(
+            "job_timeout job_type=%s job_id=%s timeout=%ss",
+            job_type, job_id, timeout,
+        )
     except Exception as exc:
         async with session_factory() as db:
             job = await db.get(Job, job_id)
@@ -75,7 +78,12 @@ async def _run_job(
                 job.status = "failed"
                 job.message = (str(exc) or type(exc).__name__)[:500]
                 await db.commit()
-        logger.exception("job_failed", job_type=job_type, job_id=str(job_id))
+        # `logger` is the stdlib logger, not structlog: kwargs are rejected
+        # outright ("Logger._log() got an unexpected keyword argument"), so the
+        # handler raised a TypeError *while handling an exception* and every job
+        # failure surfaced as that TypeError instead of its own cause. The Job
+        # row kept the real message, but the log lost it.
+        logger.exception("job_failed job_type=%s job_id=%s", job_type, job_id)
 
 
 async def spawn_job(

@@ -139,9 +139,20 @@ export default function AnalyticsPage() {
                 <div className="metric-foot"><span className="positive">Across {data.length} personas</span></div>
               </article>
               <article className="metric-card">
-                <div className="metric-top"><span>Total Revenue</span><span className="metric-icon">{Icons.dollar}</span></div>
+                <div className="metric-top"><span>Recorded revenue</span><span className="metric-icon">{Icons.dollar}</span></div>
                 <strong>R {totalRevenue.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</strong>
-                <div className="metric-foot"><span className="positive">This month</span></div>
+                {/* This card said "Total Revenue / This month" over a figure
+                    that is neither. `AnalyticsSnapshot.revenue` is whatever the
+                    Instagram and TikTok syncs wrote (both hardcode 0, because
+                    neither API reports money) or whatever a person typed into
+                    the manual form. It is a record, not a payment, and one
+                    snapshot per persona is not this month's takings. The real
+                    ledger is on the dashboard; this page is per-persona source
+                    data. */}
+                <div className="metric-foot">
+                  <span className="warning">Recorded, not payments</span>
+                  <small>Latest snapshot per persona</small>
+                </div>
               </article>
               <article className="metric-card">
                 <div className="metric-top"><span>Total Views</span><span className="metric-icon">{Icons.trending}</span></div>
@@ -221,7 +232,7 @@ export default function AnalyticsPage() {
                         />
                       </div>
                       <div>
-                        <label style={{ fontSize: 11, color: 'var(--muted)', display: 'block', marginBottom: 4 }}>Revenue (R)</label>
+                        <label style={{ fontSize: 11, color: 'var(--muted)', display: 'block', marginBottom: 4 }}>Revenue (R) — recorded, not a payment</label>
                         <input
                           type="number"
                           value={manualForm.revenue}
@@ -249,10 +260,14 @@ export default function AnalyticsPage() {
             }}>
               <h4 style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>📊 Data Sources</h4>
               <ul style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.8 }}>
-                <li><strong style={{ color: '#22c55e' }}>Instagram</strong> — Real data synced via Instagram Graph API. Requires INSTAGRAM_ACCESS_TOKEN in .env</li>
-                <li><strong style={{ color: '#3b82f6' }}>Manual</strong> — Data you entered by hand</li>
+                <li><strong style={{ color: '#22c55e' }}>Instagram</strong> — Followers, views and engagement synced from the Instagram Graph API (requires INSTAGRAM_ACCESS_TOKEN in .env). <strong style={{ color: 'var(--text)' }}>Revenue is written as 0</strong> — the API does not report money, so this source can never produce a revenue figure.</li>
+                <li><strong style={{ color: '#3b82f6' }}>Manual</strong> — Figures a person typed in. Whatever is entered here is what appears above; nothing verifies it against a platform.</li>
                 <li><strong style={{ color: '#fbbf24' }}>Demo</strong> — Randomly generated placeholder data. Replace with real data above.</li>
               </ul>
+              <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>
+                None of these is a payment. The platform ledger — the only real-money
+                reading this studio can produce — is on the <a href="/">dashboard</a>.
+              </p>
             </div>
           </>
         )}

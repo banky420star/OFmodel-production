@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      The Persona Studio UI for the Production Line stack (/Volumes/AI_DRIVE/persona).
+
+      This exists because for a long time nothing managed port 3000 at all: the
+      UI was started by hand from a terminal and only stayed up until that
+      terminal closed, while com.persona.web — the name that sounds like this
+      service — actually started the *other* copy of the app (the older one in
+      Downloads, on port 3100). That service is now com.persona.downloads.web.
+
+      It talks to the API on :8000 (com.persona.driveapi); the Next.js app
+      proxies /api/* there.
+    -->
+    <key>Label</key>
+    <string>com.persona.driveweb</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>export PATH=/Users/bank/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin; cd /Volumes/AI_DRIVE/persona/apps/web &amp;&amp; exec npx next dev -p 3000</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Volumes/AI_DRIVE/persona/apps/web</string>
+    <key>StandardOutPath</key>
+    <string>/tmp/persona_driveweb.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/persona_driveweb.log</string>
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>

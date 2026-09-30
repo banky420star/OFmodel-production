@@ -84,6 +84,16 @@ LORA_NODE = {
 
 
 class ComfyUIImageProvider(ImageProvider):
+    @property
+    def SUPPORTS_ADULT(self) -> bool:  # noqa: N802 — matches the base-class flag
+        """Adult capability follows the loaded checkpoint, not the software.
+
+        ComfyUI will happily run any weights, so claiming adult support by
+        default would let the gate be satisfied by a stock SDXL checkpoint that
+        filters or mangles explicit prompts. True only when the operator has
+        said, in config, that an adult checkpoint is what is loaded.
+        """
+        return bool(get_settings().COMFYUI_ADULT_CHECKPOINT)
     """Real image generation via ComfyUI API.
 
     Connects to ComfyUI's REST API to queue prompts and retrieve results.
@@ -152,19 +162,11 @@ class ComfyUIImageProvider(ImageProvider):
             workflow["7"]["inputs"]["text"] = negative_prompt or "bad quality, blurry"
             workflow["4"]["inputs"]["ckpt_name"] = checkpoint
 
-            # Inject LoRA if provided
+            # Inject the persona's LoRA, if this identity has one. Until now
+            # nothing on the generation path passed lora_path, so a trained
+            # adapter was never applied even when it existed.
             if lora_path:
-                import copy
-                lora_node = copy.deepcopy(LORA_NODE)
-                lora_node["inputs"]["lora_name"] = lora_path
-                lora_node["inputs"]["strength_model"] = lora_strength
-                lora_node["inputs"]["strength_clip"] = lora_strength
-                # Rewire: model -> lora -> sampler, clip -> lora -> text encoders
-                workflow["3"]["inputs"]["model"] = ["10", 0]
-                workflow["3"]["inputs"]["positive"] = ["10", 1] if "positive" in workflow["3"]["inputs"] else ["6", 0]
-                workflow["6"]["inputs"]["clip"] = ["10", 1]
-                workflow["7"]["inputs"]["clip"] = ["10", 1]
-                workflow["10"] = lora_node
+                self._inject_lora(workflow, lora_path, lora_strength)
 
             # Queue prompt
             payload = {"prompt": workflow, "client_id": str(uuid.uuid4())}
@@ -234,10 +236,45 @@ class ComfyUIImageProvider(ImageProvider):
                 latency_ms=(time.monotonic() - start) * 1000,
             )
 
+    @staticmethod
+    def _inject_lora(workflow: dict, lora_path: str, lora_strength: float) -> None:
+        """Insert a LoraLoader between the checkpoint and everything that reads it.
+
+        LoraLoader emits (0) MODEL and (1) CLIP, so every node consuming the
+        checkpoint's MODEL or CLIP has to be rewired to the loader. Those
+        consumers are found by inspecting the graph rather than by hardcoding
+        node ids, because the txt2img and img2img graphs differ and each has
+        grown new nodes over time.
+
+        The sampler's `positive`/`negative` inputs are deliberately left alone:
+        they consume *conditioning* from the CLIPTextEncode nodes, not a CLIP
+        model. The previous version pointed `positive` at the loader's CLIP
+        output, which is a type mismatch — ComfyUI rejects the whole graph
+        before running it, so the LoRA path never produced an image at all.
+        """
+        import copy
+
+        node_id = "10"
+        node = copy.deepcopy(LORA_NODE)
+        node["inputs"]["lora_name"] = lora_path
+        node["inputs"]["strength_model"] = lora_strength
+        node["inputs"]["strength_clip"] = lora_strength
+        workflow[node_id] = node
+
+        for key, spec in list(workflow.items()):
+            if key == node_id or not isinstance(spec, dict):
+                continue
+            inputs = spec.get("inputs")
+            if not isinstance(inputs, dict):
+                continue
+            if inputs.get("model") == ["4", 0]:
+                inputs["model"] = [node_id, 0]
+            if inputs.get("clip") == ["4", 1]:
+                inputs["clip"] = [node_id, 1]
+
     async def _wait_for_completion(self, prompt_id: str) -> dict | None:
         """Poll ComfyUI /history endpoint until prompt completes."""
         client = await self._get_client()
-        checkpoint = await self._checkpoint_name(client)
         deadline = time.monotonic() + self._timeout
 
         while time.monotonic() < deadline:
@@ -265,6 +302,8 @@ class ComfyUIImageProvider(ImageProvider):
         width: int = 1024,
         height: int = 1024,
         seed: int = -1,
+        lora_path: str = "",
+        lora_strength: float = 0.8,
     ) -> ProviderResult:
         """Identity-locked edit: upload the reference image, run img2img.
 
@@ -302,6 +341,8 @@ class ComfyUIImageProvider(ImageProvider):
                 height=height,
                 seed=seed,
                 negative_prompt=negative_prompt,
+                lora_path=lora_path,
+                lora_strength=lora_strength,
             )
             if not result.success:
                 return result
@@ -340,9 +381,17 @@ class ComfyUIImageProvider(ImageProvider):
         negative_prompt = kwargs.get("negative_prompt", "")
         steps = kwargs.get("steps", 30)
         cfg_scale = kwargs.get("cfg_scale", 7.0)
+        lora_path = kwargs.get("lora_path", "")
+        lora_strength = kwargs.get("lora_strength", 0.8)
 
         try:
             client = await self._get_client()
+
+            # Resolve the installed checkpoint filename. Required here: node "4"
+            # loads it below, and without this assignment every call raised
+            # NameError("name 'checkpoint' is not defined") — which is what
+            # silently emptied every identity-locked reference dataset.
+            checkpoint = await self._checkpoint_name(client)
 
             # Build workflow with img2img nodes
             workflow = {
@@ -392,6 +441,12 @@ class ComfyUIImageProvider(ImageProvider):
             }
 
             start = time.monotonic()
+            # The identity-locked edit path is the one that actually runs for
+            # every persona image, so the adapter has to be applied here too —
+            # wiring it only into txt2img left it unused in practice.
+            if lora_path:
+                self._inject_lora(workflow, lora_path, lora_strength)
+
             payload = {"prompt": workflow, "client_id": str(uuid.uuid4())}
             resp = await client.post("/prompt", json=payload)
             resp.raise_for_status()
@@ -408,6 +463,8 @@ class ComfyUIImageProvider(ImageProvider):
                         "source": image_key,
                         "seed": seed,
                         "strength": strength,
+                        "lora_path": lora_path,
+                        "lora_strength": lora_strength,
                         "is_mock": False,
                     },
                     provider=self._provider,

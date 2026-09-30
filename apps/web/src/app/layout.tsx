@@ -1,6 +1,7 @@
 import type { Metadata } from 'next'
 import './globals.css'
 import Sidebar from '@/components/Sidebar'
+import BootCheck from '@/components/BootCheck'
 
 export const metadata: Metadata = {
   title: 'Persona Studio',
@@ -20,6 +21,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <Sidebar />
           {children}
         </div>
+        {/* Mounted outside the shell so it overlays the whole app. In the
+            layout because it is a whole-app concern, not a page's — it guards
+            itself to one run per tab session. See BootCheck.tsx. */}
+        <BootCheck />
       </body>
     </html>
   )

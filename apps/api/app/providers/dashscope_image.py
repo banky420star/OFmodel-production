@@ -17,6 +17,7 @@ import logging
 
 import httpx
 
+from app import paths
 from app.providers.base import ImageProvider, ProviderResult
 
 logger = logging.getLogger(__name__)
@@ -143,7 +144,7 @@ class DashScopeImageProvider(ImageProvider):
 
                                     # Store via filesystem
                                     from pathlib import Path
-                                    storage_dir = Path(__file__).parent.parent.parent / "storage" / "avatars"
+                                    storage_dir = paths.AVATAR_DIR
                                     storage_dir.mkdir(parents=True, exist_ok=True)
 
                                     elapsed_ms = (time.monotonic() - start) * 1000

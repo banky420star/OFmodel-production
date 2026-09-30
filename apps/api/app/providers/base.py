@@ -38,6 +38,14 @@ class LLMProvider(ABC):
 class ImageProvider(ABC):
     """Image generation interface."""
 
+    # Does this provider (as configured) actually generate adult content?
+    # Declared by the provider itself so the adult gate can ask the provider
+    # that is really in use, instead of hardcoding one vendor's name. Defaults
+    # to False: nothing is adult-capable unless it says so and can back it up
+    # (for a self-hosted backend that means an adult checkpoint is loaded, not
+    # merely that the software could load one).
+    SUPPORTS_ADULT: bool = False
+
     @abstractmethod
     async def generate(
         self,
@@ -141,7 +149,15 @@ class TrainerProvider(ABC):
         epochs: int = 10,
         learning_rate: float = 1e-4,
         batch_size: int = 4,
+        image_paths: list[str] | None = None,
     ) -> ProviderResult:
+        """Train a model on a dataset.
+
+        `image_paths` is optional on the interface but should be supplied by
+        callers that have the dataset record: it is the authoritative list of
+        reference images, and without it an implementation has to guess where
+        the images live.
+        """
         ...
 
     @abstractmethod

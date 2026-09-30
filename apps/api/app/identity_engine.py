@@ -24,14 +24,18 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import paths
 from app.database import AsyncSessionLocal
-from app.models import IdentityLock, Persona
+from app.models import Identity, IdentityLock, IdentityStatus, Persona
 
 logger = logging.getLogger(__name__)
 
-AVATAR_DIR = Path(__file__).parent.parent / "storage" / "avatars"
-SHOOT_DIR = Path(__file__).parent.parent / "storage" / "shoots"
-GALLERY_DIR = Path(__file__).parent.parent / "storage" / "gallery"
+# Re-exported under their historical names: tests patch these attributes
+# directly, so they must stay module-level here even though app/paths.py owns
+# the value.
+AVATAR_DIR = paths.AVATAR_DIR
+SHOOT_DIR = paths.SHOOT_DIR
+GALLERY_DIR = paths.GALLERY_DIR
 
 
 def stable_seed(*parts: object) -> int:
@@ -118,6 +122,70 @@ def build_locked_prompt(identity_lock: dict, scene_prompt: str) -> str:
     return f"Perfectly preserve the facial features. {base}. {scene_prompt}"
 
 
+async def get_persona_adapter(
+    persona_id_hex: str, db: Optional[AsyncSession] = None
+) -> dict:
+    """The persona's trained adapter *and the base it was trained against*.
+
+    Both come off **one** identity row on purpose. Reading the LoRA from the
+    READY identity and the training base in a second query would let the two
+    land on different candidates, and the render gate would then compare a base
+    against an adapter it does not describe — a mismatch invented by the lookup
+    rather than found in the weights.
+
+    Returns `{"lora_name": <ComfyUI-relative filename or "">,
+              "recorded_base": <the recorded base dict, or None>}`.
+    """
+    if db is None:
+        async with AsyncSessionLocal() as session:
+            return await get_persona_adapter(persona_id_hex, session)
+
+    result = await db.execute(
+        select(Identity)
+        .where(Identity.persona_id == UUID(persona_id_hex))
+        .where(Identity.lora_model_path != "")
+        .order_by(Identity.created_at.desc())
+    )
+    identities = result.scalars().all()
+    if not identities:
+        return {"lora_name": "", "recorded_base": None}
+
+    # Prefer a READY identity: a rejected or failed candidate may carry a path
+    # from an earlier attempt, and applying that would be worse than applying
+    # nothing.
+    chosen = identities[0]
+    for identity in identities:
+        if identity.status == IdentityStatus.READY:
+            chosen = identity
+            break
+
+    metadata = chosen.metadata_json if isinstance(chosen.metadata_json, dict) else {}
+    recorded = metadata.get("lora_training_base")
+    return {
+        "lora_name": chosen.lora_model_path,
+        "recorded_base": recorded if isinstance(recorded, dict) else None,
+    }
+
+
+async def get_persona_lora_name(
+    persona_id_hex: str, db: Optional[AsyncSession] = None
+) -> str:
+    """The persona's trained LoRA adapter, or "" when it has none.
+
+    Returns the **ComfyUI-relative filename** the trainer published under, which
+    is what LoraLoader resolves against its own models/loras directory. An
+    absolute path would be accepted by the code and load nothing, so the
+    trainer records this form on the identity and keeps the absolute path on the
+    TrainingJob and QA rows.
+
+    Empty is the honest answer for a persona whose training failed — and per the
+    build's failure policy that persona is still ACTIVE and usable, so callers
+    must treat "" as "no adapter", not as an error.
+    """
+    adapter = await get_persona_adapter(persona_id_hex, db)
+    return adapter["lora_name"]
+
+
 async def generate_identity_locked(
     persona_id_hex: str,
     scene_prompt: str,
@@ -126,6 +194,7 @@ async def generate_identity_locked(
     height: int = 1024,
     seed_override: Optional[int] = None,
     db: Optional[AsyncSession] = None,
+    adult: bool = False,
 ) -> dict:
     """Generate an identity-locked image.
 
@@ -133,9 +202,15 @@ async def generate_identity_locked(
 
     1. Loads the identity lock (seed + prompt) through the async ORM
     2. Picks the configured image provider from the strict registry
-    3. Loads the persona's avatar as the edit reference so the face stays
+    3. Checks that any adapter it is about to apply was trained on the
+       checkpoint that will render it, and refuses when that cannot be shown
+    4. Loads the persona's avatar as the edit reference so the face stays
        consistent across every image
-    4. Saves to output_path
+    5. Saves to output_path
+
+    `adult=True` selects the fail-closed policy on step 3 — see
+    `lora_base.PathPolicy`. Callers on the adult route pass it; everything else
+    is plate content, where an unrecorded base warns rather than blocking.
 
     A missing lock, missing avatar, or provider without edit support is a
     real failure — no placeholder is ever substituted.
@@ -171,6 +246,71 @@ async def generate_identity_locked(
     full_prompt = build_locked_prompt(lock, scene_prompt)
     seed = seed_override if seed_override is not None else lock["seed"]
 
+    # Apply the persona's trained adapter, when it has one. Identity consistency
+    # used to rest entirely on img2img off the locked avatar: the LoRA was
+    # trained and then never applied, because no generation path passed
+    # lora_path even though every provider accepted it. Providers that cannot
+    # apply a LoRA (DashScope's edit API has no adapter concept) are not handed
+    # one — the parameter is filtered by signature rather than assumed, so
+    # adding support to another provider needs no change here.
+    import inspect
+
+    adapter = await get_persona_adapter(persona_id_hex, db)
+    lora_name = adapter["lora_name"]
+
+    # The identity gate — and the reason the adapter and its recorded base are
+    # read together, off one identity row.
+    #
+    # `lora_base_state` was already computed for the persona summary and
+    # surfaced by the API, while every render path walked straight past it: a
+    # swapped base was reported after the sale instead of refused before it. The
+    # measured case is Naomi's adapter, trained on `sd_xl_base_1.0` and rendered
+    # on `RealVisXL_V4.0` — same SDXL family, and the face came back identical
+    # to no adapter at all.
+    #
+    # Fires only when an adapter is about to be applied. With no LoRA there is no
+    # base binding to violate, and "" is the documented state of a persona whose
+    # training failed — still a usable persona, not an error.
+    if lora_name:
+        from app.config import get_settings
+        from app.lora_base import GateError, PathPolicy, enforce_before_render
+
+        try:
+            decision = enforce_before_render(
+                adapter["recorded_base"],
+                get_settings().COMFYUI_CHECKPOINT,
+                path=PathPolicy.ADULT if adult else PathPolicy.PLATE,
+            )
+        except GateError as exc:
+            # Named, not softened into a generic provider error: the operator's
+            # next action is a retrain, and the reason has to say which base.
+            logger.warning(
+                "identity_gate_refused persona=%s state=%s reason=%s",
+                persona_id_hex, exc.decision.state, exc.decision.reason,
+            )
+            return {
+                "success": False,
+                "error": f"identity gate: {exc.decision.reason}",
+                "identity_gate_state": exc.decision.state,
+                "lora_name": lora_name,
+            }
+        if decision.warn:
+            logger.warning(
+                "identity_gate_unverified persona=%s reason=%s",
+                persona_id_hex, decision.reason,
+            )
+
+    lora_applied = bool(lora_name) and "lora_path" in inspect.signature(edit).parameters
+    if lora_name and not lora_applied:
+        logger.warning(
+            "lora_not_applicable_to_provider persona=%s provider=%s lora=%s",
+            persona_id_hex, type(provider).__name__, lora_name,
+        )
+
+    edit_kwargs: dict = {}
+    if lora_applied:
+        edit_kwargs["lora_path"] = lora_name
+
     result = await edit(
         reference_image_bytes=ref_bytes,
         prompt=full_prompt,
@@ -178,6 +318,7 @@ async def generate_identity_locked(
         width=width,
         height=height,
         seed=seed,
+        **edit_kwargs,
     )
     success, error = result.success, result.error
     image_bytes = result.data.get("image_bytes") if success else None
@@ -203,6 +344,9 @@ async def generate_identity_locked(
         "prompt": full_prompt,
         "size_bytes": len(image_bytes),
         "latency_ms": latency_ms,
+        # Reported so a caller can tell an identity-locked image that used the
+        # persona's own adapter from one that fell back to pure img2img.
+        "lora_name": lora_name if lora_applied else "",
     }
 
 

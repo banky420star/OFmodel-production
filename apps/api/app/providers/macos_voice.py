@@ -15,10 +15,11 @@ import time
 import uuid
 from pathlib import Path
 
+from app import paths
 from app.providers.base import ProviderResult, VoiceProvider
 
 
-VOICE_DIR = Path(__file__).parent.parent.parent / "storage" / "voices"
+VOICE_DIR = paths.VOICES_DIR
 
 
 class MacOSVoiceProvider(VoiceProvider):

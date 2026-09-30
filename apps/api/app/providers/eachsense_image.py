@@ -101,6 +101,10 @@ def _parse_sse_for_image(text: str) -> tuple[str, str]:
 class EachSenseImageProvider(ImageProvider):
     """Image generation via EachLabs each::sense (adult-capable)."""
 
+    # Declared, not inferred from the provider name — this is what the adult
+    # gate reads.
+    SUPPORTS_ADULT = True
+
     def __init__(self, api_key: str = "", mode: str = ""):
         self._api_key = api_key or os.getenv("EACHLABS_API_KEY", "")
         self._mode = mode or os.getenv("EACHSENSE_MODE", "max")

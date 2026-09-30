@@ -2,31 +2,114 @@
 
 import { useEffect, useState } from 'react'
 import { getDashboardSummary } from '@/lib/api'
-import type { DashboardSummary } from '@/lib/types'
+import type { DashboardSummary, RealRevenue } from '@/lib/types'
 import { GRADIENTS } from '@/lib/constants'
 import { Icons } from '@/lib/icons'
-import { formatCurrency, getGreeting, getDayString } from '@/lib/utils'
+import { formatCurrency, formatMoney, getGreeting, getDayString } from '@/lib/utils'
 
-/* ── Sparkline (dashboard-only) ──────────────────────── */
-function Sparkline({ revenue }: { revenue: number }) {
-  const base = 56
-  const peak = revenue > 0 ? 8 : 30
-  const coords = ['0,' + base, '9.1,' + (base - 3), '18.2,' + (base - 6), '27.3,' + (base - 10),
-    '36.4,' + (base - 14), '45.5,' + (base - 18), '54.5,' + (base - 22), '63.6,' + (base - 27),
-    '72.7,' + (base - 32), '81.8,' + (base - 37), '90.9,' + (base - 42), '100,' + peak]
-  const linePath = 'M' + coords.join(' L')
-  const fillPath = linePath + ' L100,60 L0,60 Z'
+/* ── Money, and what it is not ────────────────────────────
+ *
+ * This panel used to draw a sparkline whose every point was hardcoded (only
+ * the last one moved), over a fabricated SEP–AUG axis, next to three scenario
+ * buttons that did nothing — presenting a revenue trajectory that no data in
+ * this app produces. It was replaced by the figures that do exist, with a note
+ * claiming there was no series here to chart.
+ *
+ * That claim was wrong, and this file carried it for a day: Fanvue's earnings
+ * summary includes `overTime`, its own ledger bucketed by day or week. So the
+ * series below is drawn from that, and the rule is the old one inverted — the
+ * chart shows what the platform actually sent, and shows nothing at all when it
+ * sent no buckets. An empty chart with a drawn axis reads as a month of zeros,
+ * which is the same lie in a nicer shape.
+ *
+ * The one number that is real is the connected platform's own ledger. The one
+ * that is not is `data.revenue`, which is still rendered below it — labelled,
+ * because an unlabelled R 0 on a dashboard is read as "we earned nothing". */
+
+const SOURCE_LABELS: Record<string, string> = {
+  messages: 'Paid messages',
+  subs: 'Subscriptions',
+  posts: 'Paid posts',
+  tips: 'Tips',
+  referrals: 'Referrals',
+  renewals: 'Renewals',
+  other: 'Other',
+}
+
+/* Each state is a different next action, so each gets its own words. 'ok' is
+   the only one that carries a figure, and it is the only one that reads green. */
+const REVENUE_STATES: Record<string, string> = {
+  ok: 'From the platform’s own ledger',
+  not_configured: 'No platform connected',
+  disabled: 'Connected, but publishing is not armed',
+  unsupported: 'This platform exposes no earnings endpoint',
+  error: 'The platform could not be read',
+}
+
+/** A bucket boundary as a short date. `2026-09-03T00:00:00Z` → `Sep 3`. */
+function bucketLabel(iso: string): string {
+  const at = new Date(iso)
+  if (Number.isNaN(at.getTime())) return iso
+  return at.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+}
+
+/* The platform's own ledger, drawn to scale.
+ *
+ * Bars, not a line: the buckets are discrete periods and a line between two of
+ * them implies money arriving in between, which is not what the platform
+ * reported. Every bar's height is its value over the window's peak, so the
+ * tallest bar is always the largest bucket that actually exists — the old
+ * sparkline's y-axis named magnitudes nothing had reached.
+ *
+ * Requires two buckets. One bucket is a number, and that number is already in
+ * the rows above; a chart of it would be a chart of a single point dressed as a
+ * trend. Returns null rather than an empty frame. */
+function RevenueSeries({ real }: { real: RealRevenue }) {
+  const points = (real.over_time || []).filter(
+    (p): p is { period_start: string; gross: number | null; net: number } =>
+      typeof p.net === 'number',
+  )
+  if (points.length < 2) return null
+
+  const peak = Math.max(...points.map(p => p.net), 0)
+  if (peak <= 0) {
+    // Every bucket the platform reported was zero or negative (refund rows
+    // carry negatives). A chart of that is a flat line that reads as broken;
+    // the sentence says the same thing without pretending to be a chart.
+    return (
+      <p className="money-note">
+        No bucket in this window was positive. The platform reported {points.length}{' '}
+        {bucketLabel(points[0].period_start)}–{bucketLabel(points[points.length - 1].period_start)}.
+      </p>
+    )
+  }
+
+  const unit = real.period?.granularity === 'week' ? 'week' : 'day'
   return (
-    <svg className="sparkline" viewBox="0 0 100 60" preserveAspectRatio="none">
-      <defs>
-        <linearGradient id="sparkFill" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" stopColor="#d9fb71" stopOpacity=".28"/>
-          <stop offset="1" stopColor="#d9fb71" stopOpacity="0"/>
-        </linearGradient>
-      </defs>
-      <path d={fillPath} fill="url(#sparkFill)"/>
-      <path d={linePath} fill="none" stroke="#d9fb71" strokeWidth="2" vectorEffect="non-scaling-stroke"/>
-    </svg>
+    <figure className="money-series-figure">
+      <div
+        className="money-series"
+        role="img"
+        aria-label={`Net earnings per ${unit} from the platform ledger: ${points
+          .map(p => `${bucketLabel(p.period_start)} ${formatMoney(p.net, real.currency)}`)
+          .join(', ')}`}
+      >
+        {points.map(p => (
+          <i
+            key={p.period_start}
+            style={{ height: `${Math.max(2, (p.net / peak) * 100)}%` }}
+            title={`${bucketLabel(p.period_start)} — ${formatMoney(p.net, real.currency)}`}
+          />
+        ))}
+      </div>
+      <figcaption className="money-series-axis">
+        <span>{bucketLabel(points[0].period_start)}</span>
+        <span>
+          net per {unit} · peak {formatMoney(peak, real.currency)}
+        </span>
+        <span>{bucketLabel(points[points.length - 1].period_start)}</span>
+      </figcaption>
+    </figure>
   )
 }
 
@@ -93,6 +176,12 @@ export default function Dashboard() {
   const data = summary!
   const attentionCount = data.attention_items.length
 
+  const real = data.real_revenue
+  const revenueOk = data.real_revenue_state === 'ok'
+  const revenueLabel = REVENUE_STATES[data.real_revenue_state] || 'The ledger could not be read'
+  const revenueTone = revenueOk ? 'var(--green)' : 'var(--amber)'
+  const sources = Object.entries(real.by_source || {})
+
   return (
     <main className="workspace">
       <header className="topbar">
@@ -142,11 +231,15 @@ export default function Dashboard() {
           </a>
           <a href="/analytics" className="section-link" style={{ textDecoration: 'none' }}>
             <article className="metric-card">
-              <div className="metric-top"><span>Revenue this month</span><span className="metric-icon">{Icons.dollar}</span></div>
-              <strong>{formatCurrency(data.revenue)}</strong>
+              <div className="metric-top"><span>Paid this month</span><span className="metric-icon">{Icons.dollar}</span></div>
+              <strong>{formatMoney(real.this_month_net, real.currency)}</strong>
               <div className="metric-foot">
-                <span className="positive">{data.active_models > 0 ? 'From analytics' : 'No data yet'}</span>
-                <small>Across all personas</small>
+                <span style={{ color: revenueTone }}>{revenueLabel}</span>
+                <small>
+                  {real.net !== null
+                    ? `${formatMoney(real.net, real.currency)} all time, net of the platform's fee`
+                    : `Recorded analytics ${formatCurrency(data.revenue)} — not payments`}
+                </small>
               </div>
             </article>
           </a>
@@ -167,22 +260,54 @@ export default function Dashboard() {
         {/* Dashboard grid */}
         <section className="dashboard-grid">
           <article className="panel revenue-panel">
-            <a href="/analytics" className="panel-head-link" style={{ display: 'block', color: 'inherit', textDecoration: 'none' }}>
             <div className="panel-head">
               <div>
-                <span className="kicker">Revenue trajectory</span>
-                <h2>{formatCurrency(data.revenue)}</h2>
-                <p><b style={{ color: 'var(--green)' }}>{data.active_models > 0 ? `From ${data.active_models} active model${data.active_models > 1 ? 's' : ''}` : 'No revenue data'}</b></p>
+                <span className="kicker">Money in</span>
+                <h2>{formatMoney(real.this_month_net, real.currency)}</h2>
+                <p><b style={{ color: revenueTone }}>{revenueLabel}</b></p>
               </div>
-              <div className="scenario-tabs">
-                <button onClick={() => {}} >Conservative</button><button className="selected">Base</button><button onClick={() => {}} >Aggressive</button>
+              <a href="/analytics"><button className="text-button">Analytics {Icons.arrowRight}</button></a>
+            </div>
+
+            {revenueOk ? (
+              <div className="money-rows">
+                {sources.length === 0 ? (
+                  <p className="money-note">
+                    The platform reported a total but no breakdown by source for this window.
+                  </p>
+                ) : sources.map(([name, net]) => (
+                  <div key={name} className="money-row">
+                    <span>{SOURCE_LABELS[name] || name}</span>
+                    <b>{formatMoney(net, real.currency)}</b>
+                  </div>
+                ))}
+                <div className="money-row money-row-total">
+                  <span>All time, net of fee</span>
+                  <b>{formatMoney(real.net, real.currency)}</b>
+                </div>
+                {/* Renders itself or nothing — see RevenueSeries. */}
+                <RevenueSeries real={real} />
               </div>
+            ) : (
+              <div className="money-note">
+                <p>
+                  {data.real_revenue_detail ||
+                    'Nothing has been read from a platform ledger, so there is no figure to show — which is not the same as zero.'}
+                </p>
+                <p>
+                  Nothing in this app can take a payment. The wallet and ledger under
+                  <code>/fan</code> are simulated and the only payment processor configured is
+                  <code>fake</code>, so real money can only arrive through a platform the studio
+                  is connected to and publishing to.
+                </p>
+              </div>
+            )}
+
+            <div className="money-recorded">
+              <span>Recorded analytics revenue</span>
+              <b>{formatCurrency(data.revenue)}</b>
+              <small>{data.revenue_note}</small>
             </div>
-            <Sparkline revenue={data.revenue} />
-            <div className="chart-labels">
-              <span>SEP</span><span>NOV</span><span>JAN</span><span>MAR</span><span>MAY</span><span>JUL</span><span>AUG</span>
-            </div>
-            </a>
           </article>
 
           <article className="panel production-panel">

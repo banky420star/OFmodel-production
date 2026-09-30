@@ -3,6 +3,7 @@
 import { useEffect, useState, useRef } from 'react'
 import { listFans, listFanMessages, autoReply, listPersonas } from '@/lib/api'
 import { Icons } from '@/lib/icons'
+import { formatMoney } from '@/lib/utils'
 
 interface Fan {
   id: string; persona_id: string; username: string; display_name: string
@@ -100,16 +101,37 @@ export default function ChatPage() {
       <div className="content">
         <section className="page-heading">
           <div>
-            <h1>Fan Chat & Revenue</h1>
+            <p className="eyebrow">Simulated — not platform data</p>
+            <h1>Fan Chat</h1>
             <p>AI-powered fan engagement. Auto-reply, PPV, and scoring.</p>
           </div>
         </section>
 
+        {/* The label above used to be absent and the heading read "Fan Chat &
+            Revenue", over a Rand-denominated "Revenue" figure and a promise
+            that "Fans appear here when they subscribe". None of that is true:
+            every row here comes from this app's own simulated ledger — the only
+            payment processor in the app is `fake`, and `Fan.total_spent` and
+            friends are derived caches written beside it (see `app/models.py`).
+            No subscription can create a row here, so no number on this page is
+            evidence that anyone paid. */}
+        <div className="panel" style={{ marginBottom: 18, borderColor: 'var(--amber)', background: 'var(--amber-dim)' }}>
+          <p style={{ fontSize: 12, color: 'var(--amber)', lineHeight: 1.55 }}>
+            <b>This page is the simulated ledger.</b> The fans, the amounts spent, and the scores below
+            are this app&apos;s own records — nothing here came from a payment and no platform reports
+            it. Money that actually arrived is on <a href="/monetization" style={{ color: 'var(--amber)', textDecoration: 'underline' }}>Monetization</a>,
+            read from the connected platform&apos;s own books.
+          </p>
+        </div>
+
         {/* Stats */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 24 }}>
           {[
-            { label: 'Total Fans', value: fans.length, color: 'var(--text)' },
-            { label: 'Revenue', value: `R ${totalRevenue.toLocaleString()}`, color: 'var(--green)' },
+            { label: 'Fans (simulated)', value: fans.length, color: 'var(--text)' },
+            // `formatMoney` with no currency prints a bare number: the studio's
+            // own `formatCurrency` prefixes `R`, which is a real currency this
+            // ledger is not denominated in, and a symbol would read as a claim.
+            { label: 'Recorded spend (not payments)', value: formatMoney(totalRevenue), color: 'var(--text-muted)' },
             { label: 'Whales', value: whaleCount, color: 'var(--blue)' },
             { label: 'AI Score Avg', value: fans.length ? (fans.reduce((s, f) => s + (f.fan_score || 0), 0) / fans.length).toFixed(0) : '0', color: 'var(--text)' },
           ].map((stat, i) => (
@@ -144,7 +166,11 @@ export default function ChatPage() {
               ) : filteredFans.length === 0 ? (
                 <div style={{ textAlign: 'center', padding: '32px 16px', color: 'var(--text-muted)' }}>
                   <p style={{ fontSize: 14, marginBottom: 8 }}>No fans yet</p>
-                  <p style={{ fontSize: 12 }}>Fans appear here when they subscribe.</p>
+                  {/* The line here used to read "Fans appear here when they
+                      subscribe." No subscription can create one of these rows —
+                      there is no payment processor but `fake` — so it promised a
+                      mechanism that does not exist. */}
+                  <p style={{ fontSize: 12 }}>Rows appear here when this app's simulated ledger creates them. Nothing on a platform feeds this list.</p>
                 </div>
               ) : (
                 filteredFans.map(fan => (
@@ -160,7 +186,7 @@ export default function ChatPage() {
                         <div className="muted-sm">@{fan.username}</div>
                       </div>
                       <div style={{ textAlign: 'right' }}>
-                        <div style={{ fontSize: 12, color: 'var(--green)', fontWeight: 600 }}>R {(fan.total_spent || 0).toLocaleString()}</div>
+                        <div style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 600 }} title="Recorded in this app's simulated ledger — not a payment">{formatMoney(fan.total_spent)}</div>
                         <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Score: {fan.fan_score || 0}</div>
                       </div>
                     </div>
@@ -189,7 +215,7 @@ export default function ChatPage() {
                     padding: '2px 8px', borderRadius: 10, fontSize: 10,
                     background: 'var(--bg-card)', color: 'var(--text-muted)',
                   }}>
-                    R {(selectedFan.total_spent || 0).toLocaleString()} spent
+                    {formatMoney(selectedFan.total_spent)} recorded — not a payment
                   </span>
                 </div>
 

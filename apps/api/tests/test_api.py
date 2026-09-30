@@ -39,6 +39,41 @@ async def test_create_persona(client):
 
 
 @pytest.mark.asyncio
+async def test_create_persona_persists_requested_fields(client):
+    """POST /personas must store what it was asked to store.
+
+    Regression: the handler built Persona(name=..., status=..., appearance=...)
+    and omitted age, description, adult_verified and synthetic_identity, so the
+    request's values were silently replaced by the column defaults. It stayed
+    invisible while adult_verified defaulted to True — the payload said True and
+    the default said True, so the assertion below passed by coincidence. The
+    values here are deliberately unlike the defaults (age 31 not 24,
+    adult_verified False not True) so a dropped field fails loudly.
+    """
+    resp = await client.post("/api/v1/personas", json={
+        "name": _uniq("RoundTrip"),
+        "age": 31,
+        "description": "distinctive description that must survive the round trip",
+        "adult_verified": False,
+        "synthetic_identity": True,
+    })
+    assert resp.status_code in (200, 201)
+    data = resp.json()
+    assert data["age"] == 31
+    assert data["description"] == "distinctive description that must survive the round trip"
+    assert data["adult_verified"] is False
+    assert data["synthetic_identity"] is True
+
+    # And it must be stored, not just echoed — read it back from the API.
+    got = await client.get(f"/api/v1/personas/{data['id']}")
+    assert got.status_code == 200
+    stored = got.json()
+    assert stored["age"] == 31
+    assert stored["description"] == "distinctive description that must survive the round trip"
+    assert stored["adult_verified"] is False
+
+
+@pytest.mark.asyncio
 async def test_create_persona_rejects未成年(client):
     resp = await client.post("/api/v1/personas", json={
         "name": "Underage",

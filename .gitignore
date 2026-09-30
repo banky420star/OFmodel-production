@@ -47,3 +47,15 @@ apps/api/app/storage/
 .env.backup.*
 apps/web/.impeccable/
 apps/web/test-results/
+
+# Generated output / scratch, not source.
+# NOTE: git only reads `#` as a comment at the START of a line. A trailing
+# comment is part of the pattern, so `storage/  # media` matches nothing at
+# all — which is how the first version of this block ignored none of it.
+# Comments therefore go on their own lines here.
+storage/
+backups/
+*.zip
+*.tsbuildinfo
+# The `*.db` rule above misses the -wal/-shm siblings of a sqlite file.
+apps/api/_smoke.db*

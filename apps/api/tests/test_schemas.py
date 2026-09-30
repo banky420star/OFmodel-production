@@ -18,8 +18,15 @@ def test_persona_create_valid():
     p = PersonaCreate(name="Ava", age=24)
     assert p.name == "Ava"
     assert p.age == 24
-    assert p.adult_verified is True
+    # adult_verified is opt-in: a caller that does not ask for it gets a persona
+    # the adult routes will refuse, not one recorded as verified by default.
+    assert p.adult_verified is False
     assert p.synthetic_identity is True
+
+
+def test_persona_create_adult_verified_is_opt_in():
+    p = PersonaCreate(name="Ava", age=24, adult_verified=True)
+    assert p.adult_verified is True
 
 
 def test_persona_create_rejects_underage():

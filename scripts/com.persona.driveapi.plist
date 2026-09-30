@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      The Persona Production Line API on :8000. Copied here from
+      ~/Library/LaunchAgents so the running service has a source in the repo —
+      it was the only one of the two that did not, which meant the most
+      important service on this machine existed solely in a login-local
+      directory. Install with:
+
+        cp scripts/com.persona.driveapi.plist ~/Library/LaunchAgents/
+        launchctl bootout   gui/$(id -u)/com.persona.driveapi 2>/dev/null
+        launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.persona.driveapi.plist
+
+      Keep the `&amp;&amp;` escaped: a bare `&` is invalid XML. `plutil -lint` refuses
+      the file while launchd's lenient parser loads it anyway, so the breakage
+      only shows up in whatever parses it next.
+
+      Do not restart this service while a build is running — the build runs
+      inside this process, so `kickstart -k` throws away up to two hours of
+      work. `GET /api/v1/jobs` first.
+
+      The UI counterpart is com.persona.driveweb.
+    -->
+    <key>Label</key>
+    <string>com.persona.driveapi</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>cd /Volumes/AI_DRIVE/persona/apps/api &amp;&amp; exec ./.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --loop asyncio --http h11</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Volumes/AI_DRIVE/persona/apps/api</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>API_PORT</key>
+        <string>8000</string>
+        <key>PYTHONPATH</key>
+        <string>/Volumes/AI_DRIVE/persona/apps/api</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/tmp/persona_driveapi.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/persona_driveapi.log</string>
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>

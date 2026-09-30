@@ -36,22 +36,32 @@ const icons = {
 
 export default function Sidebar() {
   const pathname = usePathname()
+  const isFanSurface = pathname.startsWith('/fan')
   const [shootCount, setShootCount] = useState(0)
   const [healthChecks, setHealthChecks] = useState<{ service: string; status: string }[]>([])
 
   useEffect(() => {
+    // The operator dashboard is an unauthenticated API and a fan has no
+    // business calling it — or seeing the operator chrome at all.
+    if (isFanSurface) return
     getDashboardSummary()
       .then((data: DashboardSummary) => {
         setShootCount(data.total_shoots || 0)
         setHealthChecks(data.health?.checks || [])
       })
       .catch(() => {})
-  }, [])
+  }, [isFanSurface])
 
   const isActive = (href: string) => {
     if (href === '/') return pathname === '/'
     return pathname.startsWith(href)
   }
+
+  // The fan surface is a separate product with its own shell. Hiding the
+  // operator sidebar here means a fan never sees the dashboard nav — and never
+  // gets the operator's unauthenticated API called on their behalf. The layout
+  // at /fan covers the viewport, so this returning null is belt-and-braces.
+  if (isFanSurface) return null
 
   const safeChecks = Array.isArray(healthChecks) ? healthChecks : []
   const onlineCount = safeChecks.filter(c => c.status === 'green').length
@@ -63,6 +73,8 @@ export default function Sidebar() {
   const workspaceItems: NavItem[] = [
     { label: 'Overview', href: '/', icon: icons.overview },
     { label: 'Models', href: '/models', icon: icons.models },
+    { label: 'Model manager', href: '/manager', icon: icons.registry },
+    { label: 'Divisions', href: '/divisions', icon: icon(<><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><path d="M10 6.5h4"/><path d="M6.5 10v4"/><path d="M17.5 10v4"/><path d="M10 17.5h4"/></>) },
     { label: 'Production', href: '/production', icon: icons.production, badge: shootCount },
     { label: 'Chat', href: '/chat', icon: icons.chat },
     { label: 'Mailboxes', href: '/mailbox', icon: icon(<><rect width="20" height="14" x="2" y="5" rx="2"/><path d="M22 5v14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></>) },

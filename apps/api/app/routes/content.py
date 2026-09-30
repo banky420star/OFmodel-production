@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger("persona_studio.content")
 
+from app import paths
 from app.database import get_db, AsyncSessionLocal
 from app.models import (
     Persona, Shoot, ContentPack, GeneratedVideo, GeneratedVoice,
@@ -51,6 +52,10 @@ def _require_adult_allowed():
     require_adult_image()
 
 router = APIRouter()
+
+# Owned by app/paths.py so generated content lands where main.py serves it.
+SHOOT_DIR = paths.SHOOT_DIR
+ADULT_CONTENT_DIR = paths.ADULT_CONTENT_DIR
 
 @router.get("/shoots", response_model=list[ShootResponse])
 async def list_shoots(
@@ -441,7 +446,7 @@ async def generate_adult_content(
     # Generate using identity engine
     from app.identity_engine import generate_identity_locked
 
-    content_dir = Path(__file__).parent.parent / "storage" / "adult_content" / persona_id.hex[:8]
+    content_dir = ADULT_CONTENT_DIR / persona_id.hex[:8]
     content_dir.mkdir(parents=True, exist_ok=True)
     
     filename = f"{body.content_type}_{int(time.time())}.png"
@@ -454,6 +459,10 @@ async def generate_adult_content(
         output_path=output_path,
         width=1024,
         height=1536,  # Portrait ratio
+        # Fail closed on an unverifiable adapter base. This is the path that
+        # sells the face, and `_require_adult_allowed()` above has already
+        # established we are on it — see lora_base.PathPolicy.
+        adult=True,
     )
     
     if not result["success"]:
@@ -715,7 +724,7 @@ async def _run_auto_produce(
         # Generate images for this shoot
         for i, scene in enumerate(theme_data["scenes"][:images_per_shoot]):
             full_prompt = f"{identity_desc}. {scene}"
-            output_dir = Path(__file__).parent.parent.parent / "storage" / "shoots" / shoot_id.hex[:8]
+            output_dir = SHOOT_DIR / shoot_id.hex[:8]
             output_dir.mkdir(parents=True, exist_ok=True)
             output_path = str(output_dir / f"shot_{i+1:02d}.png")
             
@@ -726,6 +735,10 @@ async def _run_auto_produce(
                     scene_prompt=full_prompt,
                     output_path=output_path,
                     seed_override=zlib.crc32(f"{shoot_id.hex}_{i}".encode()) % 2147483647,
+                    # Same fail-closed policy as generate_adult_content: this
+                    # runs under `_require_adult_allowed()` and produces the
+                    # paid shoots.
+                    adult=True,
                 )
                 if result["success"]:
                     gen_provider = result.get("provider", "unknown")

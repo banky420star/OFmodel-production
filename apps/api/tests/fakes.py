@@ -98,8 +98,19 @@ class FakeVoiceProvider(VoiceProvider):
 
 
 class FakeTrainerProvider(TrainerProvider):
+    def __init__(self):
+        # What the caller told us to train on. Recorded so a test can assert the
+        # build hands the dataset's own reference images to the trainer rather
+        # than leaving it to guess a directory.
+        self.calls: list[dict] = []
+
     async def train(self, dataset_id, model_type="lora", rank=16, epochs=10,
-                    learning_rate=1e-4, batch_size=4) -> ProviderResult:
+                    learning_rate=1e-4, batch_size=4, image_paths=None) -> ProviderResult:
+        self.calls.append({
+            "dataset_id": dataset_id,
+            "model_type": model_type,
+            "image_paths": list(image_paths) if image_paths else None,
+        })
         return ProviderResult(
             True,
             {"model_path": f"/tmp/fake_lora_{dataset_id}.safetensors", "consistency_score": 0.95},
@@ -135,3 +146,39 @@ class FakeStorageProvider(StorageProvider):
 
     async def health_check(self) -> ProviderResult:
         return ProviderResult(True, {"ok": True}, provider="fake_storage")
+
+
+class FakeInstagramProvider:
+    """Deterministic IG analytics using the real dataclasses from
+    app.providers.instagram — canned numbers, no network."""
+
+    def __init__(self, followers: int = 1234):
+        self.followers = followers
+
+    async def sync_analytics(self):
+        from app.providers.instagram import IGAnalytics, IGMedia, IGProfile
+
+        media = [
+            IGMedia(
+                media_id="m1", media_type="IMAGE", caption="hello",
+                timestamp="2026-01-01T00:00:00Z", permalink="https://example.invalid/1",
+                like_count=10, comments_count=2, reach=100, impressions=150,
+                saved=3, shares=1,
+            )
+        ]
+        return IGAnalytics(
+            profile=IGProfile(username="fake_persona", followers_count=self.followers),
+            recent_media=media,
+            total_reach=100,
+            total_impressions=150,
+            total_engagement=16,
+            total_likes=10,
+            total_comments=2,
+            total_saves=3,
+            total_shares=1,
+            avg_engagement_rate=1.3,
+            synced_at="2026-01-01T00:00:00Z",
+        )
+
+    async def health_check(self):
+        return True, "fake_persona", self.followers

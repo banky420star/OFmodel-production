@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models import (
     Persona, Identity, AnalyticsSnapshot, Forecast, Shoot, ContentPack,
-    PersonaStatus, ShootStatus,
+    PersonaStatus, ShootStatus, persona_identity_summary,
 )
 from app.schemas import (
     AnalyticsSnapshotResponse, ForecastResponse, ForecastScenario, ManualAnalyticsInput,
@@ -24,6 +24,14 @@ from app.providers.registry import get_registry
 from app.providers.gates import require
 
 router = APIRouter()
+
+# How long the dashboard will wait on the connected platform's earnings API.
+#
+# Six seconds, against the publisher's own thirty-second default: the publisher
+# is making a call it has to get right, and the dashboard is rendering a page a
+# person is staring at. Past this the honest answer is "not read", which the
+# response says — far better than a page that hangs because Fanvue is slow.
+_EARNINGS_TIMEOUT_SECONDS = 6.0
 
 @router.get("/dashboard/summary")
 async def dashboard_summary(db: AsyncSession = Depends(get_db)):
@@ -45,7 +53,21 @@ async def dashboard_summary(db: AsyncSession = Depends(get_db)):
     packs_result = await db.execute(select(ContentPack))
     packs = packs_result.scalars().all()
 
-    # Analytics totals
+    # Analytics totals.
+    #
+    # `total_revenue` is the *recorded* figure: what analytics syncs and manual
+    # entries have written to `AnalyticsSnapshot`. It was returned as a bare
+    # `"revenue"` and read as "the studio's revenue" — which is exactly the
+    # confusion this app refuses to make anywhere else, because nothing in this
+    # database can be evidence that a person paid. `billing/processor.py`
+    # resolves to `fake` and raises for anything else, the Instagram and TikTok
+    # syncs hardcode `revenue=0` (neither API reports it), and the only real
+    # ledger is the connected platform's own.
+    #
+    # So the field keeps its meaning and gains its label, and the real reading
+    # is fetched alongside it — with a short timeout, since a dashboard render
+    # must not block on someone else's API, and with `None` rather than 0 when
+    # it cannot be read.
     analytics_result = await db.execute(select(AnalyticsSnapshot))
     analytics = analytics_result.scalars().all()
     total_revenue = sum(a.revenue for a in analytics) if analytics else 0
@@ -54,6 +76,11 @@ async def dashboard_summary(db: AsyncSession = Depends(get_db)):
         sum(a.engagement_rate for a in analytics) / len(analytics)
         if analytics else 0
     )
+
+    from app.earnings import headline, real_earnings
+
+    real = await real_earnings(days=30, timeout=_EARNINGS_TIMEOUT_SECONDS)
+    real_revenue = headline(real.get("totals"))
 
     # Health
     registry = get_registry()
@@ -86,7 +113,11 @@ async def dashboard_summary(db: AsyncSession = Depends(get_db)):
         for s in all_shoots[:5]
     ]
 
-    # Build persona list for frontend
+    # Build persona list for frontend. Identity state and pack counts are joined
+    # from their own tables — they were hardcoded to None/None/0 here, which is
+    # the whole reason the Models list showed every persona as unidentified and
+    # packless no matter how far its build had got.
+    identity_summary = await persona_identity_summary(db, [p.id for p in personas])
     personas_list = [
         {
             "id": str(p.id),
@@ -94,9 +125,11 @@ async def dashboard_summary(db: AsyncSession = Depends(get_db)):
             "age": p.age or 0,
             "status": p.status.value if hasattr(p.status, 'value') else str(p.status),
             "brand": p.brand or "",
-            "identity_score": None,
-            "identity_status": None,
-            "packs_count": 0,
+            "identity_score": identity_summary.get(str(p.id), {}).get("identity_score"),
+            "identity_status": identity_summary.get(str(p.id), {}).get("identity_status"),
+            "packs_count": identity_summary.get(str(p.id), {}).get("packs_count", 0),
+            "identity_lora_base_state": identity_summary.get(str(p.id), {}).get("lora_base_state", ""),
+            "identity_lora_base_note": identity_summary.get(str(p.id), {}).get("lora_base_note", ""),
             "avatar_url": p.avatar_url or "",
             "shoots_count": len([s for s in all_shoots if str(s.persona_id) == str(p.id)]),
         }
@@ -115,7 +148,20 @@ async def dashboard_summary(db: AsyncSession = Depends(get_db)):
         "total_models": len(personas),
         "total_packs": len(packs),
         "total_shoots": len(all_shoots),
+        # What the database has recorded. Not what was paid — see `revenue_note`.
         "revenue": round(total_revenue, 2),
+        "revenue_note": (
+            "Recorded analytics revenue, not payments. Instagram and TikTok do "
+            "not report revenue and this app's own processor is simulated, so "
+            "the only real money is `real_revenue`, read from the connected "
+            "platform's ledger."
+        ),
+        # The real reading. Every figure is `None` when the platform could not be
+        # read — deliberately, so a dashboard cannot render "we earned nothing"
+        # out of "we could not ask".
+        "real_revenue": real_revenue,
+        "real_revenue_state": real.get("state"),
+        "real_revenue_detail": real.get("detail", ""),
         "followers": total_followers,
         "engagement_rate": round(avg_engagement, 4),
         "health": {
@@ -161,7 +207,8 @@ async def sync_instagram_analytics(persona_id: UUID, db: AsyncSession = Depends(
         raise HTTPException(404, "Persona not found")
 
     # Real providers only — sync fails closed with the exact env vars to set.
-    ig = require("instagram")
+    # require() returns a {capability: instance} mapping, not the instance.
+    ig = require("instagram")["instagram"]
 
     try:
         analytics = await ig.sync_analytics()

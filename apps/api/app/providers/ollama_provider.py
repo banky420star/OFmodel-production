@@ -41,7 +41,15 @@ class OllamaLLMProvider(LLMProvider):
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(base_url=self._base_url, timeout=120.0)
+            # A local model is not a remote API, and it does not answer in
+            # remote-API time. The configured model here (qwen3:8b) took ~110 s
+            # to return three candidates against the 120 s this used to be —
+            # one longer prompt from a read timeout, and a timed-out call is
+            # answered by `generate_candidates` with *invented* candidates and
+            # random consistency scores. So the bound is configurable rather
+            # than a constant that happens to be just above the observed time.
+            timeout = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "600"))
+            self._client = httpx.AsyncClient(base_url=self._base_url, timeout=timeout)
         return self._client
 
     async def complete(
@@ -77,6 +85,15 @@ class OllamaLLMProvider(LLMProvider):
                 },
                 "format": "json" if schema else "",
             }
+
+            # A thinking model (qwen3, deepseek-r1, …) emits a reasoning trace
+            # before its answer, and `num_predict` caps the two together — so on
+            # a structured extraction the trace can consume the entire budget
+            # and the JSON is reached late or not at all. The trace is not the
+            # answer and nothing downstream reads it. `think: false` is accepted
+            # by models that do not think, so this is safe for any model.
+            if schema:
+                payload["think"] = False
 
             resp = await client.post("/api/chat", json=payload)
             resp.raise_for_status()

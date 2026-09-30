@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models import Fan, ChatMessage, Persona
-from app.chat_engine import generate_chat_reply, _score_fan
+from app.chat_engine import LLMUnavailable, generate_chat_reply, _score_fan
 from app.providers.gates import require, CAPABILITY_REQUIREMENTS
 
 router = APIRouter()
@@ -140,8 +140,17 @@ async def auto_reply(
     message: str = Form(...),
     db: AsyncSession = Depends(get_db),
 ):
-    """Generate and send an AI reply to a fan message."""
+    """Generate a reply DRAFT for a fan message. Nothing is sent.
+
+    This API has no platform client, so it cannot transmit anything; what it can
+    do is write the reply down and keep the fan's message in the thread. The
+    draft then waits for a human to send it (POST .../reply/{message_id}/approve
+    records that), and only that approval moves `messages_sent`. This endpoint
+    used to answer as if it had sent, and bumped the counter that feeds the fan
+    score — evidence manufactured by the write itself.
+    """
     from app.chat_engine import generate_chat_reply
+    from app.delivery import create_draft
     from uuid import uuid4
 
     # Real providers only — AI replies need a configured LLM. Gated before any
@@ -151,12 +160,13 @@ async def auto_reply(
     fan = await find_fan(db, fan_id)
     if not fan:
         raise HTTPException(404, "Fan not found")
-    
+
     persona = await db.get(Persona, UUID(fan.persona_id) if isinstance(fan.persona_id, str) else fan.persona_id)
     if not persona:
         raise HTTPException(404, "Persona not found")
-    
-    # Save inbound message via raw SQL
+
+    # Save the fan's inbound message. That is the one thing here that is real:
+    # it arrived from outside, via the operator.
     msg_id = str(uuid4())
     now = datetime.now(timezone.utc)
     await db.execute(
@@ -164,64 +174,128 @@ async def auto_reply(
              "VALUES (:id, :fan_id, :persona_id, 'inbound', :content, 'text', :now)"),
         {"id": msg_id, "fan_id": fan.id, "persona_id": fan.persona_id, "content": message, "now": now},
     )
-    # Update fan stats via raw SQL
-    new_sent = (fan.messages_sent or 0) + 1
     await db.execute(
-        text("UPDATE fans SET messages_sent = :sent, last_message_at = :now WHERE id = :fid"),
-        {"sent": new_sent, "now": now, "fid": fan.id},
+        text("UPDATE fans SET messages_received = messages_received + 1, last_message_at = :now WHERE id = :fid"),
+        {"now": now, "fid": fan.id},
     )
-    
+
     # Get conversation history via raw SQL
     history_msgs = await query_fan_messages(db, fan_id, 10)
     history = [{"direction": m.direction, "content": m.content} for m in history_msgs]
     history.reverse()
-    
+
     # Calculate days since last active
     days_since = 0
     if fan.last_active:
         days_since = (datetime.now(timezone.utc) - fan.last_active).days
-    
-    # Generate AI reply
-    reply = await generate_chat_reply(
-        persona_name=persona.name,
-        brand=persona.brand or "lifestyle",
-        personality=json.dumps(persona.personality) if persona.personality else "friendly, flirty",
-        voice_style=persona.voice_style or "casual English",
-        fan_message=message,
-        conversation_history=history,
-        fan_total_spent=fan.total_spent or 0,
-        fan_ppv_purchases=fan.ppv_purchases or 0,
-        fan_messages_sent=fan.messages_sent or 0,
-        days_since_last_active=days_since,
+
+    from app.character import load_character
+
+    character = await load_character(db, str(persona.id))
+
+    # Generate AI reply. If no provider in the chain answers, the whole request
+    # rolls back and the operator is told — the old behaviour here was a canned
+    # "hey babe! 💕" written to the thread as though the persona had said it.
+    try:
+        reply = await generate_chat_reply(
+            persona_name=persona.name,
+            brand=persona.brand or "lifestyle",
+            personality=json.dumps(persona.personality) if persona.personality else "friendly, flirty",
+            voice_style=persona.voice_style or "casual English",
+            fan_message=message,
+            conversation_history=history,
+            fan_total_spent=fan.total_spent or 0,
+            fan_ppv_purchases=fan.ppv_purchases or 0,
+            fan_messages_sent=fan.messages_sent or 0,
+            days_since_last_active=days_since,
+            character=character,
+        )
+    except LLMUnavailable as exc:
+        raise HTTPException(503, f"No LLM provider could generate a reply: {exc}")
+
+    draft = await create_draft(
+        db,
+        fan_id=fan.id,
+        persona_id=fan.persona_id,
+        content=reply.text,
+        message_type="text",
+        is_ai_generated=True,
+        intent=reply.intent,
+        sentiment=reply.sentiment,
+        extra={
+            "suggests_ppv": reply.suggests_ppv,
+            "ppv_prompt": reply.ppv_prompt,
+        },
     )
-    
-    # Save outbound message via raw SQL
-    out_id = str(uuid4())
-    await db.execute(
-        text("INSERT INTO chat_messages (id, fan_id, persona_id, direction, content, message_type, "
-             "is_ai_generated, sentiment, intent, created_at) "
-             "VALUES (:id, :fan_id, :persona_id, 'outbound', :content, 'text', 1, :sentiment, :intent, :now)"),
-        {"id": out_id, "fan_id": fan.id, "persona_id": fan.persona_id, "content": reply.text,
-         "sentiment": reply.sentiment, "intent": reply.intent, "now": now},
-    )
-    # Update fan stats and score via raw SQL
-    new_received = (fan.messages_received or 0) + 1
-    from app.chat_engine import _score_fan
-    new_score = _score_fan(fan.total_spent or 0, fan.ppv_purchases or 0, new_sent, days_since)
-    await db.execute(
-        text("UPDATE fans SET messages_received = :recv, fan_score = :score WHERE id = :fid"),
-        {"recv": new_received, "score": new_score, "fid": fan.id},
-    )
-    
     await db.commit()
-    
+
     return {
         "reply": reply.text,
+        "message_id": draft["message_id"],
         "intent": reply.intent,
         "sentiment": reply.sentiment,
         "suggests_ppv": reply.suggests_ppv,
         "ppv_prompt": reply.ppv_prompt,
-        "fan_score": new_score,
+        # `sent` is false and `delivery.status` is "draft" because no message
+        # left this machine. Approving the draft is what records a send.
+        "sent": False,
+        "delivery": draft["delivery"],
+        "note": "Draft only. Nothing was transmitted — send it yourself, then approve it.",
+    }
+
+
+@router.post("/fans/{fan_id}/reply/{message_id}/approve")
+async def approve_reply(
+    fan_id: str,
+    message_id: str,
+    content: str = Form(""),
+    approved_by: str = Form("operator"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Record that a human has sent a draft reply, optionally edited first."""
+    from app.delivery import approve_draft
+
+    result = await approve_draft(
+        db, fan_id=fan_id, message_id=message_id,
+        approved_by=approved_by, content=content,
+    )
+    if not result.get("ok"):
+        raise HTTPException(409, result.get("error", "could not approve draft"))
+    await db.commit()
+    return result
+
+
+@router.post("/fans/{fan_id}/reply/{message_id}/discard")
+async def discard_reply(
+    fan_id: str,
+    message_id: str,
+    reason: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+):
+    """Reject a draft. Kept on the record so it is not mistaken for pending."""
+    from app.delivery import discard_draft
+
+    result = await discard_draft(db, fan_id=fan_id, message_id=message_id, reason=reason)
+    if not result.get("ok"):
+        raise HTTPException(409, result.get("error", "could not discard draft"))
+    await db.commit()
+    return result
+
+
+@router.get("/fans/drafts")
+async def list_reply_drafts(
+    persona_id: str | None = None,
+    fan_id: str | None = None,
+    limit: int = 100,
+    db: AsyncSession = Depends(get_db),
+):
+    """The approval queue: replies generated but not yet sent by a human."""
+    from app.delivery import list_drafts
+
+    return {
+        "drafts": await list_drafts(
+            db, persona_id=persona_id, fan_id=fan_id, limit=limit
+        )
     }
 
 
@@ -233,26 +307,35 @@ async def send_ppv(
     caption: str = Query(""),
     db: AsyncSession = Depends(get_db),
 ):
-    """Send a PPV message to a fan."""
-    from uuid import uuid4
-    
+    """Draft a PPV message. Nothing is transmitted and nothing is charged."""
+    from app.delivery import create_draft
+
     fan = await find_fan(db, fan_id)
     if not fan:
         raise HTTPException(404, "Fan not found")
-    
-    msg_id = str(uuid4())
-    now = datetime.now(timezone.utc)
-    await db.execute(
-        text("INSERT INTO chat_messages (id, fan_id, persona_id, direction, content, message_type, "
-             "is_ppv, ppv_price, metadata_json, created_at) "
-             "VALUES (:id, :fan_id, :persona_id, 'outbound', :content, 'ppv', 1, :price, :meta, :now)"),
-        {"id": msg_id, "fan_id": fan.id, "persona_id": fan.persona_id,
-         "content": caption or 'exclusive content', "price": price,
-         "meta": json.dumps({"content_key": content_key}), "now": now},
+
+    draft = await create_draft(
+        db,
+        fan_id=fan.id,
+        persona_id=fan.persona_id,
+        content=caption or "exclusive content",
+        message_type="ppv",
+        is_ai_generated=False,
+        extra={"content_key": content_key, "ppv_price": price},
     )
     await db.commit()
-    
-    return {"status": "sent", "ppv_price": price, "fan": fan.username}
+
+    return {
+        "status": "draft",
+        "sent": False,
+        "message_id": draft["message_id"],
+        "ppv_price": price,
+        "fan": fan.username,
+        "note": (
+            "Draft only — no PPV was delivered and no purchase was unlocked. "
+            "Send it yourself, then approve it."
+        ),
+    }
 
 
 @router.post("/fans/mass-message")
@@ -263,8 +346,14 @@ async def mass_message(
     custom_message: str = Query(""),
     db: AsyncSession = Depends(get_db),
 ):
-    """Send a mass message to multiple fans."""
+    """Draft a mass message for multiple fans. Nothing is transmitted.
+
+    The response says `drafted`, not `sent`. The old one returned `{"sent": n}`
+    after writing n local rows, which is the same claim the single-reply path
+    made and just as unfounded.
+    """
     from app.chat_engine import generate_mass_message
+    from app.delivery import create_draft
     from uuid import uuid4
 
     # Real providers only — AI-generated mass messages need a configured LLM.
@@ -273,7 +362,7 @@ async def mass_message(
     persona = await db.get(Persona, persona_id)
     if not persona:
         raise HTTPException(404, "Persona not found")
-    
+
     # Get target fans via raw SQL
     if fan_ids:
         placeholders = ', '.join([':f' + str(i) for i in range(len(fan_ids))])
@@ -285,29 +374,50 @@ async def mass_message(
             text("SELECT id, display_name, username FROM fans WHERE persona_id = :pid AND status = 'active'"),
             {"pid": persona_id})
     fans = fans_result.fetchall()
-    
-    now = datetime.now(timezone.utc)
-    sent = 0
+
+    from app.character import load_character
+
+    character = await load_character(db, str(persona.id))
+
+    drafted = 0
+    message_ids = []
     for fan_id_val, display_name, username in fans:
-        msg_text = await generate_mass_message(
-            persona_name=persona.name,
-            brand=persona.brand or "lifestyle",
-            personality=json.dumps(persona.personality) if persona.personality else "friendly",
-            voice_style=persona.voice_style or "casual",
-            message_type=message_type,
-            fan_name=display_name or username,
-            custom_context=custom_message,
+        try:
+            msg_text = await generate_mass_message(
+                persona_name=persona.name,
+                brand=persona.brand or "lifestyle",
+                personality=json.dumps(persona.personality) if persona.personality else "friendly",
+                voice_style=persona.voice_style or "casual",
+                message_type=message_type,
+                fan_name=display_name or username,
+                custom_context=custom_message,
+                character=character,
+            )
+        except LLMUnavailable as exc:
+            # Nothing is partially drafted: the whole request rolls back, so the
+            # operator retries rather than sending a batch that silently lost
+            # half its messages.
+            raise HTTPException(503, f"No LLM provider could generate messages: {exc}")
+        draft = await create_draft(
+            db,
+            fan_id=fan_id_val,
+            persona_id=persona_id,
+            content=msg_text,
+            message_type="text",
+            is_ai_generated=True,
+            extra={"campaign": message_type},
         )
-        msg_id = str(uuid4())
-        await db.execute(
-            text("INSERT INTO chat_messages (id, fan_id, persona_id, direction, content, message_type, is_ai_generated, created_at) "
-                 "VALUES (:id, :fan_id, :pid, 'outbound', :content, 'text', 1, :now)"),
-            {"id": msg_id, "fan_id": fan_id_val, "pid": persona_id, "content": msg_text, "now": now},
-        )
-        sent += 1
-    
+        message_ids.append(draft["message_id"])
+        drafted += 1
+
     await db.commit()
-    return {"sent": sent, "message_type": message_type}
+    return {
+        "drafted": drafted,
+        "sent": 0,
+        "message_ids": message_ids,
+        "message_type": message_type,
+        "note": "Drafts only — approve each one after you have sent it.",
+    }
 
 
 @router.get("/fans/analytics")
@@ -535,8 +645,16 @@ async def send_as_persona(
     message_type: str = Query("text"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Send a message as the persona to a fan (operator override)."""
-    from uuid import uuid4
+    """Record an operator-typed message as sent by the persona.
+
+    This one is a human action — someone typed the text and is telling the API
+    they sent it — so it is recorded as sent, immediately and with the operator's
+    authority. What it does *not* do is transmit anything: there is no platform
+    client here, so `channel` is `operator-reported` and `sent: false` is
+    replaced by `status: "sent"` only because a person said so, and the response
+    says which of those it is.
+    """
+    from app.delivery import create_draft, approve_draft
 
     persona = await db.get(Persona, persona_id)
     if not persona:
@@ -546,20 +664,28 @@ async def send_as_persona(
     if not fan or str(fan.persona_id) != str(persona_id):
         raise HTTPException(404, "Fan not found in this persona's mailbox")
 
-    msg_id = str(uuid4())
-    now = datetime.now(timezone.utc)
-    await db.execute(
-        text("INSERT INTO chat_messages (id, fan_id, persona_id, direction, content, message_type, is_ai_generated, created_at) "
-             "VALUES (:id, :fan_id, :pid, 'outbound', :content, :mt, 0, :now)"),
-        {"id": msg_id, "fan_id": fan.id, "pid": persona_id, "content": content, "mt": message_type, "now": now},
+    draft = await create_draft(
+        db,
+        fan_id=fan.id,
+        persona_id=persona_id,
+        content=content,
+        message_type=message_type,
+        is_ai_generated=False,
     )
-    await db.execute(
-        text("UPDATE fans SET messages_received = messages_received + 1, last_message_at = :now WHERE id = :fid"),
-        {"now": now, "fid": fan.id},
+    recorded = await approve_draft(
+        db, fan_id=fan.id, message_id=draft["message_id"],
+        approved_by="operator", channel="operator-reported",
     )
+    if not recorded.get("ok"):
+        raise HTTPException(409, recorded.get("error", "could not record message"))
     await db.commit()
 
-    return {"status": "sent", "message_id": msg_id}
+    return {
+        "status": "sent",
+        "delivery": recorded["delivery"],
+        "message_id": draft["message_id"],
+        "note": "Recorded as sent on the operator's word; no transmission was performed by this API.",
+    }
 
 
 # ─── Social Accounts (Platform Signup + Approval) ────────────────────

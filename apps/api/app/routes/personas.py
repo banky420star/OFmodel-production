@@ -15,11 +15,13 @@ from pydantic import BaseModel
 from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import paths
 from app.database import get_db, AsyncSessionLocal
 from app.models import (
-    Persona, Identity, Workflow, GeneratedImage, IdentityLock,
+    Persona, Identity, Workflow, GeneratedImage, IdentityLock, Job,
     PersonaStatus, IdentityStatus, WorkflowStatus, IdentityLockStatus,
     persona_storage_hex, ensure_identity_lock, persona_ready_for_production,
+    persona_identity_summary, load_canonical_identity,
 )
 from app.providers.gates import require, CAPABILITY_REQUIREMENTS
 from app.jobs.runner import spawn_job
@@ -32,9 +34,49 @@ from app.workflows.persona_flow import (
     approve_identity_handler, build_reference_dataset_handler,
     train_lora_handler, validate_identity_handler,
     create_voice_handler, activate_persona_handler,
+    evaluate_identity, identity_qa_state_from_db,
 )
 
 router = APIRouter()
+
+# Where generate-locked-image writes and the gallery route reads. Owned by
+# app/paths.py so both agree with the paths main.py actually serves.
+AVATAR_DIR = paths.AVATAR_DIR
+GALLERY_DIR = paths.GALLERY_DIR
+
+
+async def _persona_response(persona: Persona, db: AsyncSession) -> PersonaResponse:
+    """The persona, plus the build job that is currently driving it.
+
+    `PersonaResponse.job_id` is a declared field with nothing behind it: `Persona`
+    has no `job_id` column, so `from_attributes` left it at its default and it
+    came back null on *every* response — including the POST that starts a build.
+    That null is not cosmetic: the Create Model page begins polling
+    `/jobs/{job_id}` from exactly this value, and with it null it takes its
+    "persona was created instantly (shouldn't happen)" branch, so the
+    step-by-step progress view never appeared for any build.
+
+    Read rather than stored, so there is no second place for the id to drift out
+    of sync with the `jobs` table.
+    """
+    response = PersonaResponse.model_validate(persona)
+    response.job_id = await db.scalar(
+        select(Job.id)
+        .where(Job.persona_id == persona.id)
+        .order_by(Job.created_at.desc())
+        .limit(1)
+    )
+    # The three identity/pack fields are declared on PersonaResponse but have no
+    # column behind them on Persona, so `model_validate` left them at their
+    # defaults and every persona — however complete its build — reported an
+    # unknown identity and no packs. Fill them from the tables that hold them.
+    identity = (await persona_identity_summary(db, [persona.id])).get(str(persona.id), {})
+    response.identity_status = identity.get("identity_status")
+    response.identity_score = identity.get("identity_score")
+    response.packs_count = identity.get("packs_count", 0)
+    response.identity_lora_base_state = identity.get("lora_base_state", "")
+    response.identity_lora_base_note = identity.get("lora_base_note", "")
+    return response
 
 # Persona CRUD (lines 203-315)
 @router.get("/personas", response_model=list[PersonaResponse])
@@ -46,7 +88,24 @@ async def list_personas(
     if status:
         q = q.where(Persona.status == status)
     result = await db.execute(q)
-    return result.scalars().all()
+    personas = list(result.scalars().all())
+
+    # Same join as _persona_response, batched: the list is what the Models page
+    # renders, so without it every row shows an unknown identity. job_id is left
+    # at its default here on purpose — it costs a query per persona and only the
+    # Create Model page (via the POST response) and the detail page need it.
+    identity_summary = await persona_identity_summary(db, [p.id for p in personas])
+    responses = []
+    for persona in personas:
+        response = PersonaResponse.model_validate(persona)
+        identity = identity_summary.get(str(persona.id), {})
+        response.identity_status = identity.get("identity_status")
+        response.identity_score = identity.get("identity_score")
+        response.packs_count = identity.get("packs_count", 0)
+        response.identity_lora_base_state = identity.get("lora_base_state", "")
+        response.identity_lora_base_note = identity.get("lora_base_note", "")
+        responses.append(response)
+    return responses
 
 
 @router.post("/personas", response_model=PersonaResponse, status_code=201)
@@ -59,6 +118,15 @@ async def create_persona(body: PersonaCreate, db: AsyncSession = Depends(get_db)
     persona = Persona(
         id=uuid4(),
         name=body.name,
+        # These four were accepted by PersonaCreate and then never stored. The
+        # request's values were silently replaced by the column defaults, which
+        # went unnoticed only because adult_verified and synthetic_identity both
+        # defaulted to True — the request said True and the default said True,
+        # so the bug was invisible until the default became honest.
+        age=body.age,
+        description=body.description,
+        adult_verified=body.adult_verified,
+        synthetic_identity=body.synthetic_identity,
         status=PersonaStatus.BUILDING,
         appearance=body.appearance.model_dump() if body.appearance else None,
         personality=body.personality,
@@ -77,15 +145,21 @@ async def create_persona(body: PersonaCreate, db: AsyncSession = Depends(get_db)
         job_type="persona_build",
         persona_id=persona.id,
         message=f"Building persona '{persona.name}'",
-        coro_factory=lambda _job_id: _run_persona_workflow(persona.id),
+        coro_factory=lambda job_id: _run_persona_workflow(persona.id, job_id),
         session_factory=AsyncSessionLocal,
     )
 
-    return persona
+    return await _persona_response(persona, db)
 
 
-async def _run_persona_workflow(persona_id: UUID):
-    """Run the persona creation workflow in the background."""
+async def _run_persona_workflow(persona_id: UUID, job_id: UUID | None = None):
+    """Run the persona creation workflow in the background.
+
+    `job_id` is the Job row spawn_job created for this build. It has to reach
+    run_workflow or the engine never writes progress, and the Job sits at
+    progress=0 for the whole build — which is what the Create Model page draws
+    its step list from.
+    """
     from sqlalchemy import select
 
     # Same session factory the workflow engine uses — one owner for
@@ -107,8 +181,12 @@ async def _run_persona_workflow(persona_id: UUID):
             "voice_style": persona.voice_style or "",
             "brand": persona.brand or "",
             "publishing_frequency": persona.publishing_frequency or "",
-            "adult_verified": True,
-            "synthetic_identity": True,
+            # Carry the record's real value, not a hardcoded True. This is the
+            # value every workflow step sees (the engine merges input_data into
+            # each step's context), and it is how every persona ended up marked
+            # adult-verified regardless of what was requested.
+            "adult_verified": bool(persona.adult_verified),
+            "synthetic_identity": bool(persona.synthetic_identity),
         }
 
         workflow = await workflow_engine.create_workflow(
@@ -137,7 +215,7 @@ async def _run_persona_workflow(persona_id: UUID):
     workflow_engine.register_step("activate_persona", activate_persona_handler)
 
     # Run workflow (opens its own session)
-    await workflow_engine.run_workflow(workflow.id)
+    await workflow_engine.run_workflow(workflow.id, job_id=job_id)
 
     # Finalize the persona's status honestly.
     # ACTIVE requires the identity lock to exist and be usable — a build that
@@ -169,7 +247,66 @@ async def get_persona(persona_id: UUID, db: AsyncSession = Depends(get_db)):
     persona = await db.get(Persona, persona_id)
     if not persona:
         raise HTTPException(404, "Persona not found")
-    return persona
+    return await _persona_response(persona, db)
+
+
+@router.post("/personas/{persona_id}/revalidate")
+async def revalidate_persona(persona_id: UUID, db: AsyncSession = Depends(get_db)):
+    """Re-run identity QA on an existing model, without rebuilding it.
+
+    Identity validation used to be reachable only as the last step of a full
+    build: the QA row was written two hours in, and the only way to get a second
+    verdict was `POST /personas/{id}/rebuild`, which re-generates the reference
+    set, re-trains the LoRA and spends the whole two hours again. So a build
+    whose evaluator happened to be unreachable at that moment — the local model
+    not running, say — landed on REVIEW with no cheap way back off it.
+
+    This re-judges the model that already exists, from the facts already
+    recorded, through the same `evaluate_identity` the build step uses. It
+    generates nothing, trains nothing, and contacts nothing outside this machine.
+
+    A verdict here promotes or demotes the identity exactly as a build verdict
+    does, with the same rule: an evaluator that cannot answer records REVIEW and
+    changes nothing.
+    """
+    persona = await db.get(Persona, persona_id)
+    if not persona:
+        raise HTTPException(404, "Persona not found")
+
+    identity = await load_canonical_identity(db, persona_id)
+    if identity is None:
+        raise HTTPException(
+            404,
+            f"Persona '{persona.name}' has no identity to re-evaluate. "
+            "Run a build first.",
+        )
+
+    # The same provider the build's step needs, or the verdict would be a
+    # REVIEW for a reason the operator cannot see from here.
+    require("llm")
+
+    state = await identity_qa_state_from_db(db, persona, identity)
+    if state.get("reference_views_generated") is None and state.get("training_succeeded") is None:
+        raise HTTPException(
+            409,
+            f"Identity '{identity.name}' has no reference dataset and no training "
+            "run recorded, so there is nothing to judge. A build has not "
+            "completed for it.",
+        )
+
+    # workflow_id is None: this verdict has no workflow behind it, and the QA
+    # row's FK is nullable so it can say so instead of inventing one.
+    verdict = await evaluate_identity(state, identity.id, None, db)
+    await db.commit()
+
+    return {
+        **verdict,
+        "persona_id": str(persona.id),
+        "identity_id": str(identity.id),
+        "identity_status": identity.status.value
+        if hasattr(identity.status, "value") else str(identity.status),
+        "state": state,
+    }
 
 
 @router.post("/personas/{persona_id}/rebuild")
@@ -199,15 +336,18 @@ async def rebuild_persona(persona_id: UUID, db: AsyncSession = Depends(get_db)):
     persona.status = PersonaStatus.BUILDING
     await db.commit()
 
-    await spawn_job(
+    job = await spawn_job(
         db,
         job_type="persona_build",
         persona_id=persona.id,
         message=f"Rebuilding persona '{persona.name}'",
-        coro_factory=lambda _job_id: _run_persona_workflow(persona.id),
+        coro_factory=lambda job_id: _run_persona_workflow(persona.id, job_id),
         session_factory=AsyncSessionLocal,
     )
-    return {"status": "building", "persona_id": str(persona_id)}
+    # Return the job id as POST /personas does. Without it this was the one way
+    # to start a build that a client could not follow: the Create Model page's
+    # failure path wants to re-run and keep polling, and had no id to poll with.
+    return {"status": "building", "persona_id": str(persona_id), "job_id": str(job.id)}
 
 
 # ─── Analytics (Phase 11) ────────────────────────────────────────────
@@ -299,7 +439,7 @@ async def generate_locked_image(
 
     from app.identity_engine import generate_identity_locked
 
-    avatar_dir = Path(__file__).parent.parent / "storage" / "avatars"
+    avatar_dir = AVATAR_DIR
     filename = f"{persona.name.lower()}_locked.png"
     output_path = str(avatar_dir / filename)
 
@@ -336,8 +476,8 @@ async def get_persona_gallery(persona_id: UUID, db: AsyncSession = Depends(get_d
         raise HTTPException(404, "Persona not found")
 
     name_lower = persona.name.lower()
-    gallery_dir = Path(__file__).parent.parent / "storage" / "gallery"
-    avatar_dir = Path(__file__).parent.parent / "storage" / "avatars"
+    gallery_dir = GALLERY_DIR
+    avatar_dir = AVATAR_DIR
 
     images = []
 

@@ -74,6 +74,23 @@ export default function ModelsPage() {
                     <span><small>Packs</small><b>{p.packs_count}</b></span>
                     <span><small>Age</small><b>{p.age}</b></span>
                   </div>
+                  {/* A consistency score above is only meaningful if the adapter
+                      can actually reach the render. `unknown` is shown rather
+                      than hidden because it is not a pass — the base simply was
+                      not recorded, so a match cannot be claimed. */}
+                  {(p.identity_lora_base_state === 'mismatch' || p.identity_lora_base_state === 'unknown') && (
+                    <p
+                      title={p.identity_lora_base_note}
+                      style={{
+                        margin: '8px 0 0', fontSize: 11,
+                        color: p.identity_lora_base_state === 'mismatch' ? 'var(--red)' : 'var(--amber)',
+                      }}
+                    >
+                      {p.identity_lora_base_state === 'mismatch'
+                        ? 'Adapter trained on a different checkpoint — face will not hold'
+                        : 'Adapter base unverified — trained before the record was kept'}
+                    </p>
+                  )}
                 </article>
               </a>
             ))}

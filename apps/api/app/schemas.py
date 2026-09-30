@@ -29,7 +29,11 @@ class PersonaCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=128)
     age: int = Field(..., ge=18, le=99)
     description: str = ""
-    adult_verified: bool = True
+    # Opt-in, and it has to be asked for explicitly: this field is what the
+    # adult routes check, so a caller that says nothing gets a persona that
+    # cannot produce adult content — rather than one recorded as verified by
+    # default and refused by the gate at generation time.
+    adult_verified: bool = False
     synthetic_identity: bool = True
     appearance: AppearanceProfile = Field(default_factory=AppearanceProfile)
     personality: list[str] = Field(default_factory=lambda: ["confident", "playful"])
@@ -55,6 +59,12 @@ class PersonaResponse(BaseModel):
     identity_status: str | None = None
     identity_score: float | None = None
     packs_count: int = 0
+    # `match` / `mismatch` / `unknown` for the trained adapter's base against the
+    # render checkpoint, and a plain-language reason. Empty when there is no
+    # adapter. `unknown` is not a pass: a build whose base predates the record
+    # cannot be shown to match.
+    identity_lora_base_state: str = ""
+    identity_lora_base_note: str = ""
     avatar_url: str = ""
     job_id: UUID | None = None
     metadata_json: dict = Field(default_factory=dict)
@@ -301,6 +311,14 @@ class ScheduledPostResponse(BaseModel):
     scheduled_at: datetime
     posted_at: datetime | None
     status: str
+
+    # Not decoration: this is the only field on the calendar that says whether
+    # a slot could ever earn anything. It was absent from the response, so a
+    # calendar of free giveaways and a calendar of sellable posts looked
+    # identical over the API. `None` means the post is free — see
+    # `app/publishing.py`, which refuses an unpriced post on a platform that
+    # sells unless it is marked free on purpose.
+    ppv_price: float | None = None
 
     class Config:
         from_attributes = True

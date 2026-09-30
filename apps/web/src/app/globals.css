@@ -118,14 +118,36 @@ a.job-row-link:hover .job-row p b{color:var(--green)}
 .panel-title h3{font-size:14px;font-weight:600}
 .count-badge{background:var(--red-dim);color:var(--red);font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px}
 
-/* Scenario tabs */
-.scenario-tabs{display:flex;gap:2px;background:var(--bg-card);border-radius:var(--radius-sm);padding:2px}
-.scenario-tabs button{padding:4px 10px;font-size:11px;border-radius:var(--radius-sm);color:var(--text-muted)}
-.scenario-tabs button.selected{background:var(--bg-panel);color:var(--text);font-weight:500}
-
-/* Sparkline */
-.sparkline{width:100%;height:80px;margin-bottom:8px}
-.chart-labels{display:flex;justify-content:space-between;font-size:10px;color:var(--text-muted)}
+/* Money in (dashboard).
+   `.scenario-tabs`, `.sparkline` and `.chart-labels` were removed with the panel
+   they dressed: three dead scenario buttons and a hardcoded curve over a
+   fabricated month axis, presenting a revenue trajectory no data in this app
+   produces. What replaced them shows the platform's own ledger and names what
+   it cannot show — including `.money-series` below, which draws the platform's
+   real `overTime` buckets and draws nothing when it sent none. */
+.money-rows{margin-bottom:12px}
+.money-row{display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px solid var(--border)}
+.money-row:last-child{border-bottom:none}
+.money-row span{font-size:12px;color:var(--text-secondary)}
+.money-row b{font-size:13px;font-variant-numeric:tabular-nums}
+.money-row-total{border-top:1px solid var(--border-light);margin-top:2px}
+.money-row-total span{color:var(--text)}
+.money-row-total b{color:var(--green)}
+.money-note{display:flex;flex-direction:column;gap:8px;margin-bottom:12px}
+.money-note p{font-size:12px;color:var(--text-secondary);line-height:1.55}
+.money-note code{background:var(--bg-card);border-radius:4px;padding:1px 5px;font-size:11px}
+.money-series-figure{margin:2px 0 0}
+.money-series{display:flex;align-items:flex-end;gap:2px;height:56px;padding-top:2px;border-bottom:1px solid var(--border)}
+/* Bars are flex children sized from a percentage height, so they need an
+   explicit flex-basis of 0 to share the row evenly — without it a bar's width
+   would come from its (empty) content and every bucket would collapse. */
+.money-series i{flex:1 1 0;min-width:2px;background:var(--green);border-radius:2px 2px 0 0;opacity:.75}
+.money-series i:hover{opacity:1}
+.money-series-axis{display:flex;justify-content:space-between;gap:10px;margin-top:6px;font-size:11px;color:var(--text-muted);font-variant-numeric:tabular-nums}
+.money-recorded{display:flex;flex-direction:column;gap:3px;padding-top:10px;border-top:1px solid var(--border)}
+.money-recorded span{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--text-muted)}
+.money-recorded b{font-size:14px;color:var(--text-secondary);font-variant-numeric:tabular-nums}
+.money-recorded small{font-size:11px;color:var(--text-muted);line-height:1.5}
 
 /* Attention items */
 .attention-item{display:flex;align-items:center;gap:12px;width:100%;padding:12px;border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:8px;text-align:left;transition:border-color .15s}
@@ -316,3 +338,201 @@ a.job-row-link:hover .job-row p b{color:var(--green)}
 @keyframes fadeIn{from{opacity:0}to{opacity:1}}
 @keyframes shimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}
 .skeleton{background:linear-gradient(90deg,var(--bg-card) 25%,var(--bg-panel) 50%,var(--bg-card) 75%);background-size:200% 100%;animation:shimmer 1.5s infinite;border-radius:4px}
+
+/* ── Load-in connection check ────────────────────────── */
+.boot-overlay{position:fixed;inset:0;z-index:200;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(12,14,18,.93);backdrop-filter:blur(6px);animation:fadeIn .18s ease}
+.boot-overlay.boot-closing{opacity:0;pointer-events:none;transition:opacity .3s ease}
+.boot-panel{width:min(780px,100%);max-height:calc(100vh - 32px);overflow:auto;background:var(--bg-panel);border:1px solid var(--border);border-radius:var(--radius);padding:22px 24px;box-shadow:0 24px 60px rgba(0,0,0,.55);animation:slideUp .25s ease}
+.boot-head{display:flex;align-items:center;gap:11px}
+.boot-logo{width:34px;height:34px;border-radius:8px;display:block;flex:0 0 auto}
+.boot-title{font-size:16px;font-weight:600;letter-spacing:.2px}
+.boot-title em{font-style:normal;color:var(--green)}
+.boot-sub{margin:10px 0 16px;color:var(--text-secondary);font-size:13px}
+.boot-list{list-style:none;margin:0;padding:0}
+.boot-row{display:grid;grid-template-columns:16px 126px minmax(0,190px) minmax(0,1fr) 60px;align-items:center;gap:10px;padding:7px 9px;border-radius:var(--radius-sm);font-size:13px}
+.boot-row:nth-child(odd){background:rgba(255,255,255,.02)}
+.boot-mark{display:flex;align-items:center;justify-content:center;font-size:13px;line-height:1;color:var(--text-muted)}
+.boot-label{font-size:13px}
+.boot-path{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.boot-detail{color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.boot-ms{color:var(--text-muted);font-size:11px;text-align:right;font-variant-numeric:tabular-nums}
+.boot-ok .boot-mark{color:var(--green)}
+.boot-warn .boot-mark,.boot-warn .boot-detail{color:var(--amber)}
+.boot-fail .boot-mark,.boot-fail .boot-detail{color:var(--red)}
+.boot-skipped .boot-label,.boot-skipped .boot-detail{color:var(--text-muted)}
+.boot-spinner{width:11px;height:11px;border:2px solid var(--border-light);border-top-color:var(--green);border-radius:50%;animation:bootspin .7s linear infinite}
+.boot-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:16px;padding-top:14px;border-top:1px solid var(--border)}
+.boot-summary{margin:0;font-size:12px;color:var(--text-secondary)}
+.boot-actions{display:flex;gap:8px;flex:0 0 auto}
+@keyframes bootspin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){
+  .boot-overlay,.boot-panel{animation:none}
+  .boot-spinner{animation:none;border-top-color:var(--green)}
+}
+@media(max-width:640px){
+  .boot-row{grid-template-columns:16px minmax(0,1fr) 56px;row-gap:1px;padding:8px 6px}
+  .boot-mark{grid-row:1/3}
+  .boot-label{grid-column:2;grid-row:1}
+  .boot-path{display:none}
+  .boot-detail{grid-column:2/3;grid-row:2;white-space:normal}
+  .boot-ms{grid-column:3;grid-row:1}
+  .boot-foot{flex-direction:column;align-items:stretch}
+  .boot-actions{justify-content:flex-end}
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   Fan surface  (/fan)
+
+   A separate product with a separate shell. It reuses the same :root tokens
+   as the operator app so it reads as one brand, and takes the viewport with
+   `position:fixed` so no operator chrome can appear behind it.
+
+   Rules here:
+     · nothing about money is rendered without the word "simulated" nearby;
+     · the AI badge is a first-class element, not a footnote;
+     · a locked item looks locked, and says what it costs.
+   ══════════════════════════════════════════════════════════════════════ */
+
+.fan-shell{position:fixed;inset:0;z-index:200;background:var(--bg);display:flex;flex-direction:column;overflow:hidden}
+
+/* ── top bar ── */
+.fan-topbar{display:flex;align-items:center;gap:18px;padding:0 20px;height:54px;flex-shrink:0;background:var(--bg-panel);border-bottom:1px solid var(--border)}
+.fan-brand{display:flex;align-items:center;gap:9px;font-weight:600;font-size:14px}
+.fan-brand-name{letter-spacing:-.01em}
+.fan-avatar-xs{width:28px;height:28px;border-radius:50%;object-fit:cover;flex-shrink:0;background:var(--bg-card)}
+.fan-avatar-fallback{display:inline-flex;align-items:center;justify-content:center;background:var(--green);color:#0c0e12;font-size:13px;font-weight:700}
+.fan-ai-tag{display:inline-flex;align-items:center;justify-content:center;padding:2px 7px;border-radius:20px;background:var(--green-dim);color:var(--green);font-size:10px;font-weight:700;letter-spacing:.08em;border:1px solid rgba(217,251,113,.3)}
+.fan-ai-tag-lg{padding:4px 11px;font-size:11px;margin-bottom:16px}
+.fan-nav{display:flex;gap:2px;margin-left:auto}
+.fan-nav a{padding:6px 13px;border-radius:var(--radius-sm);font-size:13px;color:var(--text-secondary);transition:background .15s,color .15s}
+.fan-nav a:hover{background:var(--bg-hover);color:var(--text)}
+.fan-nav a.active{background:var(--bg-card);color:var(--text)}
+.fan-signout{font-size:12px;color:var(--text-muted);padding:6px 10px;border-radius:var(--radius-sm)}
+.fan-signout:hover{color:var(--text);background:var(--bg-hover)}
+
+.fan-main{flex:1;overflow-y:auto;display:flex;flex-direction:column;min-height:0}
+
+/* ── shared bits ── */
+.fan-page{max-width:1000px;width:100%;margin:0 auto;padding:26px 20px 60px}
+.fan-page h1{font-size:22px;font-weight:600;letter-spacing:-.02em;margin-bottom:14px}
+.fan-page h2{font-size:14px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.06em;margin:26px 0 10px}
+.fan-muted{color:var(--text-muted);font-size:12px}
+.fan-center{flex:1;display:flex;align-items:center;justify-content:center}
+.fan-spinner{width:22px;height:22px;border-radius:50%;border:2px solid var(--border-light);border-top-color:var(--green);animation:fan-spin .7s linear infinite}
+@keyframes fan-spin{to{transform:rotate(360deg)}}
+
+.fan-btn-primary{padding:9px 17px;border-radius:var(--radius-sm);background:var(--green);color:#0c0e12;font-size:13px;font-weight:600;transition:opacity .15s}
+.fan-btn-primary:hover:not(:disabled){opacity:.88}
+.fan-btn-primary:disabled{opacity:.45;cursor:not-allowed}
+.fan-btn-ghost{padding:7px 13px;border-radius:var(--radius-sm);background:var(--bg-card);border:1px solid var(--border);color:var(--text-secondary);font-size:12px;transition:background .15s,color .15s}
+.fan-btn-ghost:hover:not(:disabled){background:var(--bg-hover);color:var(--text)}
+.fan-btn-ghost:disabled{opacity:.45;cursor:not-allowed}
+
+.fan-flash{padding:9px 13px;border-radius:var(--radius-sm);background:var(--green-dim);border:1px solid rgba(217,251,113,.25);color:var(--green);font-size:12.5px;margin:12px 0}
+.fan-error{padding:9px 13px;border-radius:var(--radius-sm);background:var(--red-dim);border:1px solid rgba(224,86,86,.3);color:var(--red);font-size:12.5px;margin:12px 0}
+.fan-notice{padding:9px 13px;border-radius:var(--radius-sm);background:var(--amber-dim);border:1px solid rgba(240,173,78,.3);color:var(--amber);font-size:12.5px;margin-top:12px}
+.fan-pos{color:var(--green)}
+.fan-neg{color:var(--text-secondary)}
+.fan-fineprint{font-size:11.5px;color:var(--text-muted);margin-top:14px}
+.fan-pill{padding:3px 10px;border-radius:20px;background:var(--blue-dim);color:var(--blue);font-size:11.5px}
+
+/* The disclosure line. Used on chat, content and the viewer; never dismissible. */
+.fan-disclosure{margin:0 20px 12px;padding:9px 13px;border-radius:var(--radius-sm);background:var(--bg-card);border-left:2px solid var(--green);color:var(--text-secondary);font-size:12px;line-height:1.5}
+
+/* ── landing ── */
+.fan-landing{flex:1;display:grid;grid-template-columns:1.15fr .85fr;gap:0;overflow-y:auto}
+.fan-landing-hero{padding:56px 48px;display:flex;flex-direction:column;justify-content:center;border-right:1px solid var(--border)}
+.fan-landing-hero h1{font-size:34px;line-height:1.22;font-weight:600;letter-spacing:-.03em}
+.fan-hero-sub{color:var(--text-secondary);margin-top:16px;font-size:13.5px;line-height:1.65;max-width:44ch}
+.fan-hero-facts{list-style:none;margin-top:26px;display:flex;flex-direction:column;gap:11px;font-size:12.5px;color:var(--text-secondary);max-width:52ch}
+.fan-hero-facts b{color:var(--text)}
+.fan-landing-form{padding:56px 44px;display:flex;flex-direction:column;justify-content:center}
+.fan-tabs{display:flex;gap:2px;background:var(--bg-panel);padding:3px;border-radius:var(--radius-sm);margin-bottom:20px}
+.fan-tabs button{flex:1;padding:7px;border-radius:5px;font-size:13px;color:var(--text-secondary)}
+.fan-tabs button.active{background:var(--bg-card);color:var(--text)}
+.fan-landing-form form{display:flex;flex-direction:column;gap:14px}
+.fan-landing-form label{display:flex;flex-direction:column;gap:6px;font-size:12px;color:var(--text-secondary)}
+.fan-landing-form input{padding:10px 12px;border-radius:var(--radius-sm);background:var(--bg-card);border:1px solid var(--border);font-size:13px;color:var(--text)}
+.fan-landing-form input:focus{outline:none;border-color:var(--green)}
+.fan-field-note{color:var(--text-muted);font-size:11px;line-height:1.5}
+.fan-plan-preview{display:flex;gap:10px;margin-top:28px;flex-wrap:wrap}
+.fan-plan-chip{display:flex;flex-direction:column;gap:3px;padding:12px 14px;border-radius:var(--radius);background:var(--bg-card);border:1px solid var(--border);font-size:12.5px;min-width:150px}
+.fan-plan-chip b{font-size:13px}
+.fan-plan-chip span{color:var(--green);font-weight:600}
+.fan-plan-chip small{color:var(--text-muted);font-size:11px;line-height:1.45}
+.fan-plan-chip button{margin-top:8px}
+
+/* ── chat ── */
+.fan-chat{flex:1;display:flex;flex-direction:column;min-height:0;max-width:820px;width:100%;margin:0 auto}
+.fan-chat-head{display:flex;align-items:center;justify-content:space-between;padding:16px 20px 12px}
+.fan-chat-head b{display:block;font-size:15px}
+.fan-chat-head small{color:var(--text-muted);font-size:12px}
+.fan-thread{flex:1;overflow-y:auto;padding:6px 20px 20px;display:flex;flex-direction:column;gap:9px;min-height:0}
+.fan-thread-empty{color:var(--text-muted);font-size:12.5px;text-align:center;margin:auto;max-width:34ch;line-height:1.6}
+.fan-bubble{max-width:74%;padding:10px 14px;border-radius:16px;font-size:13.5px;line-height:1.55;white-space:pre-wrap;word-break:break-word}
+.fan-bubble.her{align-self:flex-start;background:var(--bg-card);border:1px solid var(--border);border-bottom-left-radius:5px}
+.fan-bubble.you{align-self:flex-end;background:var(--green-dim);border:1px solid rgba(217,251,113,.22);color:var(--text);border-bottom-right-radius:5px}
+.fan-typing{display:flex;gap:4px;align-items:center;padding:14px}
+.fan-typing span{width:6px;height:6px;border-radius:50%;background:var(--text-muted);animation:fan-typing 1.2s infinite}
+.fan-typing span:nth-child(2){animation-delay:.18s}
+.fan-typing span:nth-child(3){animation-delay:.36s}
+@keyframes fan-typing{0%,60%,100%{opacity:.3;transform:translateY(0)}30%{opacity:1;transform:translateY(-3px)}}
+/* The failure state lives in the transcript, where a reply would have been. */
+.fan-chat-error{align-self:flex-start;max-width:74%;padding:10px 14px;border-radius:var(--radius-sm);background:var(--red-dim);border:1px solid rgba(224,86,86,.3);color:var(--red);font-size:12.5px;line-height:1.5}
+.fan-composer{display:flex;gap:9px;padding:14px 20px 20px;border-top:1px solid var(--border);flex-shrink:0}
+.fan-composer input{flex:1;padding:11px 14px;border-radius:var(--radius);background:var(--bg-card);border:1px solid var(--border);font-size:13.5px;color:var(--text)}
+.fan-composer input:focus{outline:none;border-color:var(--green)}
+
+/* ── wallet ── */
+.fan-sim-banner{padding:10px 14px;border-radius:var(--radius);background:var(--amber-dim);border:1px solid rgba(240,173,78,.28);color:var(--amber);font-size:12.5px;line-height:1.55}
+.fan-sim-banner b{color:var(--amber)}
+.fan-balance-card{display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap;margin-top:16px;padding:20px;border-radius:var(--radius);background:var(--bg-card);border:1px solid var(--border)}
+.fan-balance-card small{display:block;color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em}
+.fan-balance{font-size:30px;font-weight:600;letter-spacing:-.02em}
+.fan-topup-row{display:flex;gap:8px;flex-wrap:wrap}
+.fan-table{width:100%;border-collapse:collapse;font-size:12.5px}
+.fan-table th{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border);color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em;font-weight:600}
+.fan-table td{padding:10px;border-bottom:1px solid var(--border)}
+.fan-table .right{text-align:right}
+.fan-activity{list-style:none;display:flex;flex-direction:column;gap:1px}
+.fan-activity li{display:flex;justify-content:space-between;gap:16px;padding:9px 10px;border-radius:var(--radius-sm);font-size:12.5px}
+.fan-activity li:nth-child(odd){background:var(--bg-panel)}
+.fan-activity-action{color:var(--text-secondary)}
+
+/* ── content shelf ── */
+.fan-shelf-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:14px 0 6px}
+.fan-balance-inline{font-size:13px;color:var(--text-secondary)}
+.fan-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:14px;margin-top:16px}
+.fan-card{border-radius:var(--radius);background:var(--bg-card);border:1px solid var(--border);overflow:hidden;display:flex;flex-direction:column}
+.fan-card.locked{border-style:dashed}
+.fan-card-cover{aspect-ratio:1;background:var(--bg-panel);display:flex;align-items:center;justify-content:center;overflow:hidden}
+.fan-card-cover img{width:100%;height:100%;object-fit:cover}
+.fan-card-locked{display:flex;flex-direction:column;align-items:center;gap:6px;color:var(--text-muted)}
+.fan-card-locked span{font-size:24px;opacity:.7}
+.fan-card-locked small{font-size:11px;text-transform:uppercase;letter-spacing:.08em}
+.fan-card-body{padding:13px;display:flex;flex-direction:column;gap:7px;flex:1}
+.fan-card-body p{font-size:12px;line-height:1.5}
+.fan-card-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:auto;padding-top:6px}
+.fan-price{font-size:14px;font-weight:600;color:var(--green)}
+.fan-plans{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px}
+
+/* ── viewer ── */
+.fan-viewer{position:fixed;inset:0;z-index:300;background:rgba(6,7,10,.9);display:flex;align-items:center;justify-content:center;padding:24px}
+.fan-viewer-inner{background:var(--bg-panel);border:1px solid var(--border);border-radius:var(--radius);max-width:900px;width:100%;max-height:100%;overflow-y:auto;padding:18px}
+.fan-viewer-inner header{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+.fan-viewer-inner header button{font-size:16px;color:var(--text-muted);padding:4px 9px;border-radius:var(--radius-sm)}
+.fan-viewer-inner header button:hover{color:var(--text);background:var(--bg-hover)}
+.fan-viewer-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px}
+.fan-viewer-grid img{width:100%;border-radius:var(--radius-sm);background:var(--bg-card)}
+
+@media(max-width:860px){
+  .fan-landing{grid-template-columns:1fr}
+  .fan-landing-hero{padding:36px 22px;border-right:none;border-bottom:1px solid var(--border)}
+  .fan-landing-hero h1{font-size:26px}
+  .fan-landing-form{padding:32px 22px}
+  .fan-disclosure{margin:0 14px 10px}
+  .fan-page{padding:18px 14px 48px}
+  .fan-bubble{max-width:86%}
+  .fan-topbar{gap:10px;padding:0 14px}
+  .fan-brand-name{display:none}
+}

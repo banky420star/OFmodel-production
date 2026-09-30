@@ -181,7 +181,8 @@ class WorkflowEngine:
             if job_id:
                 await self._update_job_progress(
                     job_id, progress=int((i / total_steps) * 100),
-                    message=f"Step {i+1}/{total_steps}: {step.name}"
+                    message=f"Step {i+1}/{total_steps}: {step.name}",
+                    current_step=i + 1, total_steps=total_steps,
                 )
 
             logger.info("executing_step", step_id=str(step.id), name=step.name, order=step.order)
@@ -194,6 +195,7 @@ class WorkflowEngine:
                     job_id,
                     progress=int(((i + 1) / total_steps) * 100),
                     message=f"Step {i+1}/{total_steps}: {step.name} ✓",
+                    current_step=i + 1, total_steps=total_steps,
                 )
 
             if updated_step.status == WorkflowStepStatus.FAILED:
@@ -201,7 +203,8 @@ class WorkflowEngine:
                 if job_id:
                     await self._update_job_progress(
                         job_id, progress=int(((i + 1) / total_steps) * 100),
-                        message=f"Failed at: {step.name}", status="failed"
+                        message=f"Failed at: {step.name}", status="failed",
+                        current_step=i + 1, total_steps=total_steps
                     )
                 break
 
@@ -228,7 +231,8 @@ class WorkflowEngine:
             final_msg = "Build complete" if not failed else "Build failed"
             await self._update_job_progress(
                 job_id, progress=100 if not failed else int(((i+1) / total_steps) * 100),
-                message=final_msg, status=final_status
+                message=final_msg, status=final_status,
+                current_step=total_steps, total_steps=total_steps
             )
 
         logger.info(
@@ -238,8 +242,24 @@ class WorkflowEngine:
         )
         return workflow
 
-    async def _update_job_progress(self, job_id: UUID, progress: int, message: str, status: str = "running"):
-        """Update a Job record with current progress."""
+    async def _update_job_progress(
+        self,
+        job_id: UUID,
+        progress: int,
+        message: str,
+        status: str = "running",
+        current_step: int | None = None,
+        total_steps: int | None = None,
+    ):
+        """Update a Job record with current progress.
+
+        `current_step`/`total_steps` are written into job metadata because
+        `GET /jobs/{id}` publishes them and the Create Model page renders them.
+        They were declared on the response and never populated by anything, so
+        the page fell back to deriving the step from `progress` — which does not
+        agree with the `message` printed directly above it ("Step 3/7: …"), and
+        reads as step 1 of 7 for the whole first seventh of a build.
+        """
         from app.models import Job
         try:
             async with self._session_factory() as db:
@@ -248,6 +268,15 @@ class WorkflowEngine:
                     job.progress = min(progress, 100)
                     job.message = message
                     job.status = status
+                    if current_step is not None or total_steps is not None:
+                        # Rebind rather than mutate: a JSON column is only seen
+                        # as changed when the attribute is assigned.
+                        metadata = dict(job.metadata_json or {})
+                        if current_step is not None:
+                            metadata["current_step"] = current_step
+                        if total_steps is not None:
+                            metadata["total_steps"] = total_steps
+                        job.metadata_json = metadata
                     await db.commit()
         except Exception as e:
             logger.error("job_update_failed", job_id=str(job_id), error=str(e))

@@ -7,6 +7,8 @@ import {
   rejectSocialAccount, activateSocialAccount, listPersonas,
   generateAccountEmail, checkAccountEmails,
   syncProfile, bulkSyncProfiles, storeCredentials,
+  connectTikTok, tiktokStatus, tiktokSync, tiktokDisconnect,
+  getSignupPacket,
 } from '@/lib/api'
 
 interface SocialAccount {
@@ -70,6 +72,13 @@ export default function SocialsPage() {
   const [rejectingId, setRejectingId] = useState<string | null>(null)
   const [rejectReason, setRejectReason] = useState<Record<string, string>>({})
   const [toast, setToast] = useState<ToastState>(null)
+  // Manual signup packet: everything a person needs to complete one platform
+  // signup by hand. Read-only — see handleSignupPacket.
+  const [packet, setPacket] = useState<any>(null)
+  const [packetLoading, setPacketLoading] = useState<string | null>(null)
+  const [copied, setCopied] = useState<string | null>(null)
+  const [credUsername, setCredUsername] = useState('')
+  const [savingCreds, setSavingCreds] = useState(false)
   const notify = (msg: string, type: 'success' | 'error' = 'success') => setToast({ msg, type })
 
   const refresh = () => {
@@ -146,23 +155,123 @@ export default function SocialsPage() {
     setActionLoading(null)
   }
 
-  const handleAutoSignup = async (id: string) => {
-    setActionLoading(id)
+  // ── Manual signup ────────────────────────────────────────────────
+  // Fetches the packet (username, password, bio, signup URL, inbox state) so a
+  // person can complete the platform's own signup form themselves. This calls
+  // the local API only — nothing here creates an account on the platform, and
+  // the account's status does not change: approve/activate stay separate,
+  // deliberate clicks for after the account really exists.
+  const handleSignupPacket = async (id: string) => {
+    setPacketLoading(id)
     try {
-      const res = await fetch(`/api/v1/social-accounts/${id}/auto-signup?headless=true`, {
-        method: 'POST',
-      })
-      const data = await res.json()
-      if (res.ok) {
-        notify(data.success
-          ? `${data.message} — check inbox at ${data.email} for verification`
-          : `${data.message} (status: ${data.status})`, data.success ? 'success' : 'error')
-      } else {
-        notify(data.detail || data.message || 'Signup failed', 'error')
-      }
+      const p = await getSignupPacket(id)
+      setPacket(p)
+      setCredUsername((p as any).username || '')
+    } catch (e: any) {
+      notify(e.message || 'Could not build signup packet', 'error')
+    }
+    setPacketLoading(null)
+  }
+
+  // Records what the operator actually registered, which is what clears the
+  // roster's missing-username/password blockers. The packet's own last step has
+  // always told the operator to save the credentials here; until now there was
+  // no control on this page that did it, and `storeCredentials` sat imported
+  // and uncalled.
+  const handleSaveCredentials = async () => {
+    if (!packet) return
+    setSavingCreds(true)
+    try {
+      await storeCredentials(packet.account_id, packet.password, credUsername)
+      notify(`Credentials saved for ${packet.platform}`)
+      setPacket(null)
       refresh()
     } catch (e: any) {
-      notify('Auto-signup failed: ' + e.message, 'error')
+      notify(e.message || 'Could not save credentials', 'error')
+    } finally {
+      setSavingCreds(false)
+    }
+  }
+
+  const copyField = async (label: string, value: string) => {
+    if (!value) return
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopied(label)
+      setTimeout(() => setCopied(null), 1500)
+    } catch {
+      // Clipboard needs a secure context; every field is selectable anyway.
+      notify('Clipboard unavailable — select the text and copy manually', 'error')
+    }
+  }
+
+  // Automated account creation is not wired here, on purpose. There used to be a
+  // "Sign Up" button on this page that POSTed /social-accounts/{id}/auto-signup
+  // with headless=true — a Playwright run that filled and submitted the real
+  // platform's signup form with an anti-automation-detection profile and a
+  // disposable-inbox email-code bypass. That is a different act from the packet
+  // above: the packet hands a human the details and the human submits the form,
+  // while auto-signup has software create the account. It is not something this
+  // UI should offer, and it also made the app's own copy untrue — both the packet
+  // note and the manager roster note state that nothing here creates a platform
+  // account. A "Save credentials" control for the packet is the supported path.
+
+  // ── TikTok — Login Kit OAuth, read-only Display API ───────────────
+  // Only reads this account's own profile + videos. Nothing here posts,
+  // follows, or likes on the account's behalf.
+  const handleTikTokConnect = async (id: string) => {
+    setActionLoading(id)
+    try {
+      const { authorize_url } = await connectTikTok(id)
+      // Full-page navigation: TikTok has to render its own consent screen.
+      // If this throws 503 it's the honest "set TIKTOK_CLIENT_KEY" error.
+      window.location.href = authorize_url
+    } catch (e: any) {
+      notify(e.message || 'Could not start TikTok authorization', 'error')
+      setActionLoading(null)
+    }
+  }
+
+  const handleTikTokSync = async (id: string) => {
+    setActionLoading(id)
+    try {
+      const res: any = await tiktokSync(id)
+      notify(
+        `Synced @${res.profile.display_name || 'account'} — ` +
+        `${res.profile.followers.toLocaleString()} followers, ` +
+        `${res.metrics.total_views.toLocaleString()} views across ${res.recent_videos.length} videos`
+      )
+      refresh()
+    } catch (e: any) {
+      notify(e.message, 'error')
+    }
+    setActionLoading(null)
+  }
+
+  const handleTikTokCheck = async (id: string) => {
+    setActionLoading(id)
+    try {
+      const s: any = await tiktokStatus(id)
+      notify(
+        s.ok
+          ? `Token live — @${s.display_name} (${(s.followers || 0).toLocaleString()} followers)`
+          : `Token not usable: ${s.detail || 'unknown error'}`,
+        s.ok ? 'success' : 'error'
+      )
+    } catch (e: any) {
+      notify(e.message, 'error')
+    }
+    setActionLoading(null)
+  }
+
+  const handleTikTokDisconnect = async (id: string) => {
+    setActionLoading(id)
+    try {
+      await tiktokDisconnect(id)
+      notify('TikTok authorization removed — reconnect to sync again')
+      refresh()
+    } catch (e: any) {
+      notify(e.message, 'error')
     }
     setActionLoading(null)
   }
@@ -478,6 +587,58 @@ export default function SocialsPage() {
 
                   {/* Actions */}
                   <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                    {/* TikTok — real OAuth (Login Kit / Display API), read-only */}
+                    {account.platform === 'tiktok' && (account.status === 'active' || account.status === 'approved') && (
+                      account.api_connected ? (
+                        <>
+                          <button
+                            onClick={() => handleTikTokSync(account.id)}
+                            disabled={actionLoading === account.id}
+                            title="Pull real followers + video stats from the TikTok Display API"
+                            style={{
+                              padding: '6px 12px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                              background: 'rgba(99,102,241,0.12)', color: '#818CF8', border: 'none',
+                            }}
+                          >
+                            {actionLoading === account.id ? '...' : 'Sync TikTok'}
+                          </button>
+                          <button
+                            onClick={() => handleTikTokCheck(account.id)}
+                            disabled={actionLoading === account.id}
+                            title="Verify the stored token still reads this account"
+                            style={{
+                              padding: '6px 12px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                              background: 'rgba(255,255,255,0.05)', color: 'var(--text-muted)', border: 'none',
+                            }}
+                          >
+                            Check
+                          </button>
+                          <button
+                            onClick={() => handleTikTokDisconnect(account.id)}
+                            disabled={actionLoading === account.id}
+                            title="Drop the stored TikTok authorization"
+                            style={{
+                              padding: '6px 12px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                              background: 'rgba(239,68,68,0.12)', color: '#EF4444', border: 'none',
+                            }}
+                          >
+                            Disconnect
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          onClick={() => handleTikTokConnect(account.id)}
+                          disabled={actionLoading === account.id}
+                          title="Authorize Persona Studio to read this account's TikTok stats"
+                          style={{
+                            padding: '6px 12px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                            background: 'var(--green)', color: '#000', border: 'none',
+                          }}
+                        >
+                          {actionLoading === account.id ? '...' : '🎵 Connect TikTok'}
+                        </button>
+                      )
+                    )}
                     {!account.email && account.status !== 'rejected' && (
                       <button
                         onClick={async () => {
@@ -522,16 +683,19 @@ export default function SocialsPage() {
                         Check Inbox
                       </button>
                     )}
-                    {account.email && account.status === 'pending_approval' && account.platform !== 'onlyfans' && (
+                    {/* Manual signup path — hands a person everything needed
+                        to complete the platform's own form. The app never
+                        contacts the platform for this. */}
+                    {['pending_approval', 'approved'].includes(account.status) && (
                       <button
-                        onClick={() => handleAutoSignup(account.id)}
-                        disabled={actionLoading === account.id}
+                        onClick={() => handleSignupPacket(account.id)}
+                        disabled={packetLoading === account.id}
                         style={{
                           padding: '6px 12px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
-                          background: 'rgba(34,197,94,0.12)', color: '#22C55E', border: 'none',
+                          background: 'rgba(129,140,248,0.12)', color: '#A5B4FC', border: 'none',
                         }}
                       >
-                        {actionLoading === account.id ? '...' : '🚀 Sign Up'}
+                        {packetLoading === account.id ? '...' : '📋 Signup packet'}
                       </button>
                     )}
                     {account.status === 'pending_approval' && (
@@ -610,6 +774,130 @@ export default function SocialsPage() {
           </div>
         )}
       </div>
+      {/* Manual signup packet. A person opens the platform's own signup page
+          and fills it in; nothing in this dialog contacts the platform, and
+          the account is not marked signed-up here. */}
+      {packet && (
+        <div
+          onClick={() => setPacket(null)}
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 50,
+            display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20,
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 12,
+              padding: 22, width: '100%', maxWidth: 580, maxHeight: '85vh', overflowY: 'auto',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
+              <div>
+                <div style={{ fontSize: 16, fontWeight: 700 }}>
+                  Signup packet — {packet.platform}
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
+                  for {packet.persona_name} · account status stays {packet.status}
+                </div>
+              </div>
+              <button
+                onClick={() => setPacket(null)}
+                style={{ background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 18, cursor: 'pointer', lineHeight: 1 }}
+              >
+                ×
+              </button>
+            </div>
+
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', margin: '14px 0 10px' }}>
+              Someone opens the signup page below and fills the form in by hand.
+            </div>
+
+            {([
+              ['Username', packet.username],
+              ['Display name', packet.display_name],
+              ['Bio', packet.bio],
+              ['Email', packet.email],
+              ['Email password', packet.email_password],
+              ['Platform password', packet.password],
+            ] as [string, string][]).map(([label, value]) => (
+              <div key={label} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+                <span style={{ width: 124, fontSize: 12, color: 'var(--text-muted)', flexShrink: 0 }}>{label}</span>
+                <code style={{
+                  flex: 1, fontSize: 12, background: 'rgba(255,255,255,0.04)', padding: '6px 8px',
+                  borderRadius: 6, overflowWrap: 'anywhere',
+                }}>
+                  {value ? String(value) : '— none yet'}
+                </code>
+                <button
+                  onClick={() => copyField(label, String(value || ''))}
+                  disabled={!value}
+                  style={{
+                    padding: '5px 10px', borderRadius: 6, fontSize: 11, fontWeight: 600, flexShrink: 0,
+                    cursor: value ? 'pointer' : 'not-allowed', opacity: value ? 1 : 0.4,
+                    background: 'rgba(99,102,241,0.12)', color: '#818CF8', border: 'none',
+                  }}
+                >
+                  {copied === label ? '✓' : 'Copy'}
+                </button>
+              </div>
+            ))}
+
+            <a
+              href={packet.signup_url}
+              target="_blank"
+              rel="noreferrer"
+              style={{
+                display: 'block', textAlign: 'center', marginTop: 16, padding: '10px 0',
+                borderRadius: 8, background: 'var(--green)', color: '#000',
+                fontSize: 13, fontWeight: 700, textDecoration: 'none',
+              }}
+            >
+              Open {packet.platform} signup page ↗
+            </a>
+
+            <ol style={{ margin: '16px 0 0', paddingLeft: 20, fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.7 }}>
+              {(packet.steps || []).map((s: string, i: number) => <li key={i}>{s}</li>)}
+            </ol>
+
+            <div style={{
+              display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap',
+              padding: '10px 12px', marginTop: 14, borderRadius: 8,
+              background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)',
+            }}>
+              <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                Account created? Record the handle you registered:
+              </span>
+              <input
+                value={credUsername}
+                onChange={e => setCredUsername(e.target.value)}
+                placeholder={packet.username || 'username'}
+                style={{ flex: 1, minWidth: 140, fontSize: 12, padding: '5px 9px', borderRadius: 6, background: 'var(--bg-card)', color: 'var(--text)', border: '1px solid var(--border)', outline: 'none' }}
+              />
+              <button
+                onClick={handleSaveCredentials}
+                disabled={savingCreds || !packet.password}
+                style={{
+                  padding: '5px 12px', borderRadius: 6, fontSize: 11, fontWeight: 600,
+                  cursor: savingCreds ? 'wait' : 'pointer', border: 'none',
+                  background: 'var(--green)', color: '#000', opacity: savingCreds || !packet.password ? .5 : 1,
+                }}
+              >
+                {savingCreds ? 'Saving…' : 'Save credentials'}
+              </button>
+            </div>
+
+            {packet.note && (
+              <div style={{
+                marginTop: 14, padding: 10, borderRadius: 8, fontSize: 11, lineHeight: 1.6,
+                background: 'rgba(251,191,36,0.08)', color: 'var(--amber)',
+              }}>
+                {packet.note}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
       <Toast toast={toast} onDismiss={() => setToast(null)} />
     </main>
   )

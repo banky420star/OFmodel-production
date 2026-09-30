@@ -1,11 +1,25 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
-import { createPersona, getJob } from '@/lib/api'
+import { createPersona, getJob, rebuildPersona } from '@/lib/api'
 import { Icons } from '@/lib/icons'
 
-type JobStatus = { id: string; status: string; progress: number; message: string }
+type JobStatus = {
+  id: string
+  status: string
+  progress: number
+  message: string
+  // Returned by GET /jobs/{id}. persona_id was missing from this type and from
+  // every setJob call, so the redirect below always interpolated `undefined` and
+  // sent every completed build to `/personas/` — the list — instead of the model
+  // that had just been built.
+  persona_id?: string | null
+  // The workflow engine now writes these into job metadata; before that they were
+  // declared on the API response and populated by nothing.
+  current_step?: number | null
+  total_steps?: number | null
+}
 
 const STEPS = [
   'Generating identity candidates',
@@ -23,31 +37,52 @@ export default function CreateModelPage() {
   const [job, setJob] = useState<JobStatus | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState(false)
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const [retrying, setRetrying] = useState(false)
   const [form, setForm] = useState({
     name: '', age: 24, hair: 'long blonde', eyeColour: 'blue',
     brand: 'luxury lifestyle', personality: 'confident, playful',
     voiceStyle: 'South African English', publishingFrequency: '5 packs/week',
   })
 
-  // Poll job progress
+  const jobId = job?.id || null
+
+  // Poll job progress while a build is running. Keyed on the job id alone: the
+  // previous effect depended on the whole `job` object and set it on every
+  // response, so each poll tore down its own interval and built a new one — the
+  // cadence was never the 1500 ms it claimed to be.
   useEffect(() => {
-    if (!job || job.status === 'completed' || job.status === 'failed') {
-      if (pollRef.current) clearInterval(pollRef.current)
-      if (job?.status === 'completed') {
-        setDone(true)
-        setTimeout(() => router.push(`/personas/${(job as any).persona_id || ''}`), 1500)
-      }
-      return
-    }
-    pollRef.current = setInterval(async () => {
+    if (!jobId) return
+    let stopped = false
+    const tick = async () => {
       try {
-        const data = await getJob(job.id) as any
-        setJob({ id: data.id, status: data.status, progress: data.progress, message: data.message })
+        const data = await getJob(jobId) as any
+        if (stopped) return
+        setJob({
+          id: data.id, status: data.status, progress: data.progress,
+          message: data.message, persona_id: data.persona_id,
+          current_step: data.current_step, total_steps: data.total_steps,
+        })
+        if (data.status === 'completed' || data.status === 'failed') {
+          stopped = true
+          clearInterval(timer)
+        }
       } catch {}
-    }, 1500)
-    return () => { if (pollRef.current) clearInterval(pollRef.current) }
-  }, [job, router])
+    }
+    const timer = setInterval(tick, 1500)
+    tick()
+    return () => { stopped = true; clearInterval(timer) }
+  }, [jobId])
+
+  // Redirect to the model that was just built. persona_id comes from the job; if
+  // the API ever omits it, fall back to the Models list rather than navigating to
+  // `/personas/` with an empty id, which is what this did on every build.
+  useEffect(() => {
+    if (job?.status !== 'completed') return
+    setDone(true)
+    const target = job.persona_id ? `/personas/${job.persona_id}` : '/models'
+    const timer = setTimeout(() => router.push(target), 1500)
+    return () => clearTimeout(timer)
+  }, [job?.status, job?.persona_id, router])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -89,7 +124,16 @@ export default function CreateModelPage() {
 
   // ── Progress view ──────────────────────────────────────
   if (job && !done) {
-    const currentStep = Math.floor((job.progress / 100) * STEPS.length)
+    // Trust the engine's own step counter when it is present. Deriving the step
+    // from `progress` (as this did) reads as step 1 of 7 through the whole first
+    // seventh of a build and could contradict the `message` printed above it,
+    // which has always carried the real "Step 3/7: …" text.
+    const stepCount = job.total_steps && job.total_steps > 0 ? job.total_steps : STEPS.length
+    const stepIndex = job.current_step
+      ? Math.min(job.current_step, stepCount) - 1
+      : Math.min(Math.floor((job.progress / 100) * stepCount), stepCount - 1)
+    const stepFinished = (job.message || '').trimEnd().endsWith('✓')
+    const currentStep = stepIndex
     return (
       <main className="workspace">
         <header className="topbar">
@@ -118,15 +162,19 @@ export default function CreateModelPage() {
                 {job.progress}%
               </span>
               <span style={{ fontSize: 13, color: 'var(--muted)' }}>
-                {job.status === 'failed' ? 'Build failed' : `Step ${Math.min(currentStep + 1, STEPS.length)} of ${STEPS.length}`}
+                {job.status === 'failed' ? 'Build failed' : `Step ${Math.min(currentStep + 1, stepCount)} of ${stepCount}`}
               </span>
             </div>
 
             {/* Step checklist */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {STEPS.map((step, i) => {
-                const isComplete = job.progress > ((i / STEPS.length) * 100)
-                const isCurrent = i === currentStep && job.status !== 'failed'
+                // A step is done when the engine has moved past it, or when it is
+                // the current one and its message is ticked off.
+                const isComplete = job.current_step
+                  ? i < currentStep || (i === currentStep && stepFinished)
+                  : job.progress > ((i / stepCount) * 100)
+                const isCurrent = i === currentStep && !isComplete && job.status !== 'failed'
                 return (
                   <div key={step} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', borderRadius: 6, background: isCurrent ? 'rgba(217,251,113,0.08)' : 'transparent' }}>
                     <span style={{
@@ -149,8 +197,29 @@ export default function CreateModelPage() {
             {job.status === 'failed' && (
               <div style={{ marginTop: 24, padding: 16, background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 8 }}>
                 <p style={{ color: '#ef4444', fontSize: 13, marginBottom: 8 }}>Build failed: {job.message}</p>
-                <button onClick={() => { setJob(null); setError(null) }} className="secondary-button" style={{ fontSize: 12 }}>
-                  Try again
+                <button
+                  disabled={retrying || !job.persona_id}
+                  onClick={async () => {
+                    if (!job.persona_id) return
+                    setRetrying(true)
+                    setError(null)
+                    try {
+                      // Re-run the build that failed rather than submitting the
+                      // form again: the persona already exists, so a second
+                      // POST /personas with the same name is a 409 and the old
+                      // "Try again" could never have succeeded.
+                      const res = await rebuildPersona(job.persona_id) as any
+                      setJob({
+                        id: res.job_id, status: 'running', progress: 0,
+                        message: 'Restarting build…', persona_id: job.persona_id,
+                        current_step: null, total_steps: null,
+                      })
+                    } catch (err: any) {
+                      setError(err.message || 'Could not restart the build')
+                    } finally { setRetrying(false) }
+                  }}
+                  className="secondary-button" style={{ fontSize: 12 }}>
+                  {retrying ? 'Restarting…' : 'Retry build'}
                 </button>
               </div>
             )}
