@@ -1,22 +1,69 @@
 'use client'
 
-import { useEffect, useState } from 'react'
-import { getDashboardSummary, listVideos, autoProduce, listJobs, listPersonas } from '@/lib/api'
-import type { DashboardSummary, ShootDetail, PersonaDetail } from '@/lib/types'
+import { useEffect, useMemo, useState } from 'react'
+import {
+  autoProduce,
+  getDashboardSummary,
+  listJobs,
+  listPersonas,
+  listVideos,
+  managerDashboard,
+} from '@/lib/api'
+import type { DashboardSummary, PersonaDetail, ShootDetail } from '@/lib/types'
 import { Icons } from '@/lib/icons'
-import { StatusBadge } from '@/components/ui/StatusBadge'
 import { Toast, type ToastState } from '@/components/ui/Toast'
 
 interface VideoItem {
-  id: string; prompt: string; video_url: string; video_key: string;
-  duration: number; width: number; height: number;
-  generation_time_ms: number; created_at: string;
+  id: string
+  prompt: string
+  video_url: string
+  video_key: string
+  duration: number
+  width: number
+  height: number
+  generation_time_ms: number
+  created_at: string
 }
 
 interface JobItem {
-  id: string; persona_id: string; job_type: string; status: string;
-  progress: number; message: string | null;
-  created_at: string; updated_at: string;
+  id: string
+  persona_id: string
+  job_type: string
+  status: string
+  progress: number
+  message: string | null
+  created_at: string
+  updated_at: string
+}
+
+interface ManagerPipelineShot {
+  shot_id: string
+  number: number
+  type: string
+  status: string
+  qa: string | null
+  asset_key: string | null
+  error: string | null
+  retries: number
+}
+
+interface ManagerPipeline {
+  shoot_id: string
+  stages: Record<string, number>
+  shots: ManagerPipelineShot[]
+}
+
+interface ManagerDash {
+  status: string
+  paused: boolean
+  current_objective: string | null
+  identity_lock: { status: string; generation_allowed: boolean }
+  inventory: Record<string, number>
+  pipeline: ManagerPipeline[]
+  active_jobs: any[]
+  pending_jobs: any[]
+  failed_jobs: any[]
+  blockers: { error: string | null; kind: string | null; task: string }[]
 }
 
 const THEMES = [
@@ -33,78 +80,156 @@ const THEMES = [
   { key: 'nude', label: 'Artistic Nude', icon: '🖼️' },
 ]
 
+const PRESETS = [
+  { key: 'quick', label: 'Quick', images: 5, videos: true, description: '5 photos + video / theme' },
+  { key: 'standard', label: 'Standard', images: 12, videos: true, description: '12 photos + video / theme' },
+  { key: 'premium', label: 'Premium', images: 20, videos: true, description: '20 photos + video / theme' },
+  { key: 'photos', label: 'Photos only', images: 15, videos: false, description: '15 photos / theme' },
+] as const
+
+const TIERS = ['PUBLIC', 'SUBSCRIBER', 'PREMIUM'] as const
+
+function StatCard({ label, value, sub }: { label: string; value: string | number; sub?: string }) {
+  return (
+    <div className="panel" style={{ padding: 14, minHeight: 86 }}>
+      <div className="muted-sm">{label}</div>
+      <div style={{ fontSize: 24, fontWeight: 700, marginTop: 4 }}>{value}</div>
+      {sub && <div className="muted-sm" style={{ marginTop: 2 }}>{sub}</div>}
+    </div>
+  )
+}
+
+function PipelineStage({
+  label,
+  value,
+  active,
+}: {
+  label: string
+  value: string
+  active?: boolean
+}) {
+  return (
+    <div style={{
+      flex: 1,
+      minWidth: 110,
+      padding: '12px 14px',
+      borderRadius: 10,
+      border: `1px solid ${active ? 'var(--green)' : 'var(--border)'}`,
+      background: active ? 'var(--green-dim)' : 'var(--bg-card)',
+    }}>
+      <div className="muted-sm" style={{ textTransform: 'uppercase', letterSpacing: '.05em' }}>{label}</div>
+      <div style={{ fontWeight: 700, marginTop: 3, color: active ? 'var(--green)' : 'var(--text)' }}>{value}</div>
+    </div>
+  )
+}
+
 export default function ProductionPage() {
   const [shoots, setShoots] = useState<ShootDetail[]>([])
   const [videos, setVideos] = useState<VideoItem[]>([])
   const [jobs, setJobs] = useState<JobItem[]>([])
   const [personas, setPersonas] = useState<PersonaDetail[]>([])
+  const [selectedPersonaId, setSelectedPersonaId] = useState('')
+  const [manager, setManager] = useState<ManagerDash | null>(null)
   const [loading, setLoading] = useState(true)
-  const [autoProducing, setAutoProducing] = useState<string | null>(null)
+  const [autoProducing, setAutoProducing] = useState(false)
   const [selectedThemes, setSelectedThemes] = useState<string[]>(['lifestyle', 'fashion', 'swimwear'])
+  const [presetKey, setPresetKey] = useState<(typeof PRESETS)[number]['key']>('standard')
+  const [tier, setTier] = useState<(typeof TIERS)[number]>('SUBSCRIBER')
   const [toast, setToast] = useState<ToastState>(null)
   const [statusFilter, setStatusFilter] = useState<'all' | 'completed' | 'failed' | 'draft'>('all')
   const [lightbox, setLightbox] = useState<string | null>(null)
+  const [expandedShoot, setExpandedShoot] = useState<string | null>(null)
+
+  const refreshCore = async () => {
+    const [summary, personaData, runningJobs] = await Promise.all([
+      getDashboardSummary(),
+      listPersonas(),
+      listJobs({ status: 'running' }).catch(() => []),
+    ])
+    setShoots((summary as DashboardSummary).shoots || [])
+    const nextPersonas = personaData as PersonaDetail[]
+    setPersonas(nextPersonas)
+    setJobs(runningJobs as JobItem[])
+    setSelectedPersonaId(prev => prev || nextPersonas.find(p => p.status === 'active')?.id || nextPersonas[0]?.id || '')
+  }
 
   useEffect(() => {
-    Promise.all([
-      getDashboardSummary().then((data: DashboardSummary) => setShoots(data.shoots || [])),
-      listPersonas().then((data: any[]) => setPersonas(data)),
-      listJobs({ status: 'running' }).then((data: JobItem[]) => setJobs(data)).catch(() => {}),
-    ]).then(() => setLoading(false)).catch(() => setLoading(false))
+    refreshCore().finally(() => setLoading(false))
   }, [])
 
-  // Poll for running jobs — always, so jobs started elsewhere still appear
   useEffect(() => {
     const interval = setInterval(() => {
-      listJobs({ status: 'running' }).then((data: JobItem[]) => setJobs(data)).catch(() => {})
-    }, 3000)
+      refreshCore().catch(() => {})
+    }, 5000)
     return () => clearInterval(interval)
   }, [])
 
-  // Load videos for each persona
   useEffect(() => {
-    if (personas.length === 0) return
-    Promise.all(
-      personas.map(p => listVideos(p.id).catch(() => []))
-    ).then(results => {
-      const all = results.flat().filter(Boolean)
-      setVideos(all as VideoItem[])
-    })
-  }, [personas])
+    if (!selectedPersonaId) return
+    Promise.all([
+      managerDashboard(selectedPersonaId).then((data: ManagerDash) => setManager(data)).catch(() => setManager(null)),
+      listVideos(selectedPersonaId).then((data: VideoItem[]) => setVideos(data || [])).catch(() => setVideos([])),
+    ])
+  }, [selectedPersonaId, jobs])
 
+  const selectedPersona = personas.find(p => p.id === selectedPersonaId) || null
+  const preset = PRESETS.find(p => p.key === presetKey) || PRESETS[1]
+  const personaShoots = selectedPersona
+    ? shoots.filter(s => s.persona_name === selectedPersona.name)
+    : shoots
   const filteredShoots = statusFilter === 'all'
-    ? shoots
-    : shoots.filter(s => (s.status || '').toLowerCase() === statusFilter)
+    ? personaShoots
+    : personaShoots.filter(s => (s.status || '').toLowerCase() === statusFilter)
 
-  const handleAutoProduce = async (personaId: string) => {
-    const personaName = personas.find(p => p.id === personaId)?.name || 'persona'
-    setAutoProducing(personaId)
+  const runningForPersona = jobs.filter(j => !selectedPersonaId || j.persona_id === selectedPersonaId)
+  const activePipeline = manager?.pipeline?.find(p => {
+    const st = p.stages || {}
+    const total = Number(st.images_total || 0)
+    const approved = Number(st.images_approved || 0)
+    return total > 0 && approved < total
+  }) || manager?.pipeline?.[0] || null
+
+  const pipelineSummary = useMemo(() => {
+    if (!activePipeline) return null
+    const st = activePipeline.stages || {}
+    const total = Number(st.images_total || activePipeline.shots.length || 0)
+    const approved = Number(st.images_approved || 0)
+    const failed = Number(st.images_failed || 0)
+    const generating = activePipeline.shots.filter(s => ['GENERATING', 'PENDING'].includes(s.status)).length
+    const qa = activePipeline.shots.filter(s => s.qa && s.status !== 'APPROVED').length
+    const progress = total > 0 ? Math.round((approved / total) * 100) : 0
+    return { total, approved, failed, generating, qa, progress }
+  }, [activePipeline])
+
+  const handleProduce = async () => {
+    if (!selectedPersona) return
+    if (selectedThemes.length === 0) {
+      setToast({ msg: 'Select at least one shoot theme.', type: 'error' })
+      return
+    }
+    setAutoProducing(true)
     try {
-      await autoProduce(personaId, {
+      await autoProduce(selectedPersona.id, {
         shoot_count: selectedThemes.length,
-        images_per_shoot: 5,
-        generate_videos: true,
+        images_per_shoot: preset.images,
+        generate_videos: preset.videos,
         adult_content: false,
         themes: selectedThemes.join(','),
       })
-      // Refresh data after a moment
-      setTimeout(() => {
-        getDashboardSummary().then((data: DashboardSummary) => setShoots(data.shoots || []))
-        listJobs({ status: 'running' }).then((data: JobItem[]) => setJobs(data)).catch(() => {})
-      }, 2000)
-      setToast({ msg: `Auto-produce started for ${personaName} — ${selectedThemes.length} themes`, type: 'success' })
-      setTimeout(() => setToast(null), 4000)
+      setToast({
+        msg: `Production started for ${selectedPersona.name}: ${selectedThemes.length} themes × ${preset.images} images${preset.videos ? ' + video' : ''}. Target tier: ${tier}.`,
+        type: 'success',
+      })
+      setTimeout(() => refreshCore().catch(() => {}), 1500)
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Unknown error'
       setToast({
-        msg: msg.includes('409')
-          ? `${personaName} is already producing — wait for the current run to finish`
-          : `Auto-produce failed: ${msg}`,
+        msg: msg.includes('409') ? `${selectedPersona.name} is already producing.` : `Production failed: ${msg}`,
         type: 'error',
       })
-      setTimeout(() => setToast(null), 5000)
     } finally {
-      setAutoProducing(null)
+      setAutoProducing(false)
+      setTimeout(() => setToast(null), 5000)
     }
   }
 
@@ -115,167 +240,222 @@ export default function ProductionPage() {
         <div className="crumb">
           <a href="/"><span>Persona Studio</span></a><b>/</b><strong>Production</strong>
         </div>
+        <div className="top-actions">
+          <span className="environment"><i />LIVE WORKSPACE</span>
+        </div>
       </header>
+
       <div className="content">
-        <section className="page-heading">
+        <section className="page-heading" style={{ marginBottom: 20 }}>
           <div>
-            <h1>Production Queue</h1>
-            <p>Shoots, videos, and generation jobs across your personas.</p>
+            <div className="eyebrow">Content operations</div>
+            <h1>Production Command Centre</h1>
+            <p>Plan shoots, run generation, inspect QA, and move finished media into inventory.</p>
           </div>
         </section>
 
-        {/* Theme Selector */}
-        <section style={{ marginBottom: 20 }}>
-          <div className="section-header">
-            <h3 className="section-title">Shoot Themes</h3>
-          </div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-            {THEMES.map(t => (
-              <button
-                key={t.key}
-                onClick={() => {
-                  setSelectedThemes(prev =>
-                    prev.includes(t.key)
-                      ? prev.filter(x => x !== t.key)
-                      : [...prev, t.key]
-                  )
-                }}
-                style={{
-                  padding: '8px 14px', borderRadius: 8,
-                  border: `1px solid ${selectedThemes.includes(t.key) ? 'var(--green)' : 'var(--border)'}`,
-                  background: selectedThemes.includes(t.key) ? 'rgba(217,251,113,0.1)' : 'var(--bg-card)',
-                  color: selectedThemes.includes(t.key) ? 'var(--green)' : 'var(--text-secondary)',
-                  fontSize: 13, cursor: 'pointer',
-                  fontWeight: selectedThemes.includes(t.key) ? 600 : 400,
-                  transition: 'all 0.15s',
-                }}
+        <section className="panel" style={{ marginBottom: 18, padding: 16 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr 1fr auto', gap: 10, alignItems: 'end' }}>
+            <label>
+              <div className="muted-sm" style={{ marginBottom: 6 }}>Persona</div>
+              <select
+                value={selectedPersonaId}
+                onChange={e => setSelectedPersonaId(e.target.value)}
+                style={{ width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--bg-card)' }}
               >
-                {t.icon} {t.label}
-              </button>
-            ))}
-          </div>
-          <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-muted)' }}>
-            {selectedThemes.length} theme{selectedThemes.length !== 1 ? 's' : ''} selected — each gets 5 images + video
-          </div>
-        </section>
+                {personas.map(p => <option key={p.id} value={p.id}>{p.name} · {p.status}</option>)}
+              </select>
+            </label>
 
-        {/* Quick Produce — compact single row */}
-        {personas.length > 0 && (
-          <section style={{ marginBottom: 20 }}>
-            <div className="section-header">
-              <h3 className="section-title">Quick Produce</h3>
-              <span className="muted-sm">{selectedThemes.length} themes × 5 images + video each</span>
-            </div>
-            <div className="panel" style={{ padding: '10px 12px' }}>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                {personas.map(p => {
-                  const busy = jobs.some(j => j.persona_id === p.id)
-                  const producing = autoProducing === p.id
-                  const disabled = producing || p.status !== 'active' || busy
-                  return (
-                    <button
-                      key={p.id}
-                      disabled={disabled}
-                      onClick={() => handleAutoProduce(p.id)}
-                      title={
-                        p.status !== 'active'
-                          ? `Cannot produce — status: ${p.status}`
-                          : busy
-                            ? 'Already producing'
-                            : `Produce ${selectedThemes.length} shoots for ${p.name}`
-                      }
-                      style={{
-                        display: 'flex', alignItems: 'center', gap: 8,
-                        padding: '6px 12px 6px 6px', borderRadius: 20,
-                        border: `1px solid ${disabled ? 'var(--border)' : 'var(--green)'}`,
-                        background: producing ? 'rgba(217,251,113,0.15)' : 'transparent',
-                        color: disabled ? 'var(--text-muted)' : 'var(--text)',
-                        fontSize: 13, cursor: disabled ? 'not-allowed' : 'pointer',
-                        opacity: disabled ? 0.55 : 1,
-                      }}
-                    >
-                      <span style={{
-                        width: 26, height: 26, borderRadius: '50%', overflow: 'hidden',
-                        background: 'var(--bg-card)', display: 'flex', alignItems: 'center',
-                        justifyContent: 'center', flexShrink: 0, fontSize: 11, fontWeight: 600,
-                        color: 'var(--text-muted)',
-                      }}>
-                        {p.avatar_url ? (
-                          <img src={p.avatar_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                        ) : (
-                          p.name.charAt(0)
-                        )}
-                      </span>
-                      {p.name}
-                      {producing || busy ? <span className="pulse-dot" style={{ width: 5, height: 5 }} /> : Icons.plus}
-                    </button>
-                  )
-                })}
+            <div>
+              <div className="muted-sm" style={{ marginBottom: 6 }}>Inventory target</div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                {TIERS.map(t => (
+                  <button
+                    key={t}
+                    onClick={() => setTier(t)}
+                    style={{
+                      flex: 1,
+                      padding: '9px 8px',
+                      borderRadius: 8,
+                      border: `1px solid ${tier === t ? 'var(--green)' : 'var(--border)'}`,
+                      background: tier === t ? 'var(--green-dim)' : 'var(--bg-card)',
+                      color: tier === t ? 'var(--green)' : 'var(--text-secondary)',
+                      fontSize: 11,
+                      fontWeight: 700,
+                    }}
+                  >{t}</button>
+                ))}
               </div>
             </div>
-          </section>
-        )}
 
-        {/* Running Jobs */}
-        {jobs.length > 0 && (
-          <section style={{ marginBottom: 24 }}>
+            <label>
+              <div className="muted-sm" style={{ marginBottom: 6 }}>Production preset</div>
+              <select
+                value={presetKey}
+                onChange={e => setPresetKey(e.target.value as (typeof PRESETS)[number]['key'])}
+                style={{ width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--bg-card)' }}
+              >
+                {PRESETS.map(p => <option key={p.key} value={p.key}>{p.label} — {p.description}</option>)}
+              </select>
+            </label>
+
+            <button
+              className="primary-button"
+              onClick={handleProduce}
+              disabled={!selectedPersona || autoProducing || selectedPersona?.status !== 'active'}
+              style={{ height: 40, opacity: (!selectedPersona || autoProducing || selectedPersona?.status !== 'active') ? .5 : 1 }}
+            >
+              {autoProducing ? <span className="pulse-dot" /> : Icons.plus}
+              {autoProducing ? 'Starting…' : 'Start production'}
+            </button>
+          </div>
+
+          <div style={{ marginTop: 14 }}>
+            <div className="muted-sm" style={{ marginBottom: 8 }}>Shoot themes</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
+              {THEMES.map(t => {
+                const selected = selectedThemes.includes(t.key)
+                return (
+                  <button
+                    key={t.key}
+                    onClick={() => setSelectedThemes(prev => selected ? prev.filter(x => x !== t.key) : [...prev, t.key])}
+                    style={{
+                      padding: '7px 11px',
+                      borderRadius: 999,
+                      border: `1px solid ${selected ? 'var(--green)' : 'var(--border)'}`,
+                      background: selected ? 'var(--green-dim)' : 'transparent',
+                      color: selected ? 'var(--green)' : 'var(--text-secondary)',
+                      fontSize: 12,
+                    }}
+                  >{t.icon} {t.label}</button>
+                )
+              })}
+            </div>
+          </div>
+        </section>
+
+        <section style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 10, marginBottom: 18 }}>
+          <StatCard label="Manager" value={manager ? (manager.paused ? 'PAUSED' : manager.status) : '—'} sub={manager?.current_objective || 'No manager state'} />
+          <StatCard label="Identity lock" value={manager?.identity_lock?.status || '—'} sub={manager?.identity_lock?.generation_allowed ? 'Generation allowed' : 'Check identity readiness'} />
+          <StatCard label="Approved media" value={(manager?.inventory?.approved_images || 0) + (manager?.inventory?.approved_videos || 0)} sub={`${manager?.inventory?.approved_images || 0} images · ${manager?.inventory?.approved_videos || 0} videos`} />
+          <StatCard label="Content runway" value={manager?.inventory?.days_of_content != null ? `${Number(manager.inventory.days_of_content).toFixed(1)}d` : '—'} sub={`${manager?.inventory?.packs || 0} packs ready`} />
+        </section>
+
+        {(activePipeline || runningForPersona.length > 0) && (
+          <section className="panel" style={{ marginBottom: 18 }}>
             <div className="section-header">
-              <h3 className="section-title">Running Jobs</h3>
-              <span className="count-badge">{jobs.length}</span>
+              <div>
+                <div className="eyebrow">Active production</div>
+                <h3 className="section-title" style={{ marginBottom: 3 }}>{selectedPersona?.name || 'Persona'} production run</h3>
+                <div className="muted-sm">{runningForPersona[0]?.message || manager?.current_objective || 'Production pipeline active'}</div>
+              </div>
+              <div style={{ fontSize: 26, fontWeight: 700, color: 'var(--green)' }}>{pipelineSummary?.progress ?? runningForPersona[0]?.progress ?? 0}%</div>
             </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {jobs.map(job => (
-                <div key={job.id} className="panel" style={{ padding: '14px 18px' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
-                    <span className="pulse-dot" />
-                    <span style={{ fontWeight: 600, fontSize: 13 }}>{job.job_type.replace(/_/g, ' ')}</span>
-                    <span className="muted-sm">{personas.find(p => p.id === job.persona_id)?.name || `${job.persona_id.slice(0, 8)}…`}</span>
-                    <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--green)' }}>{job.progress}%</span>
-                  </div>
-                  <div className="progress-bar">
-                    <div className="progress-bar-fill" style={{ width: `${job.progress}%` }} />
-                  </div>
-                  {job.message && <p className="muted-sm" style={{ marginTop: 6 }}>{job.message}</p>}
-                </div>
-              ))}
+
+            <div className="progress-bar" style={{ margin: '14px 0' }}>
+              <div className="progress-bar-fill" style={{ width: `${pipelineSummary?.progress ?? runningForPersona[0]?.progress ?? 0}%` }} />
             </div>
+
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <PipelineStage label="Brief" value={selectedThemes.length ? `${selectedThemes.length} themes` : 'Ready'} active />
+              <PipelineStage label="Generate" value={pipelineSummary ? `${pipelineSummary.approved + pipelineSummary.generating}/${pipelineSummary.total}` : runningForPersona.length ? 'Running' : '—'} active={Boolean(runningForPersona.length || pipelineSummary?.generating)} />
+              <PipelineStage label="Identity QA" value={pipelineSummary ? `${pipelineSummary.approved} approved` : '—'} active={Boolean(pipelineSummary?.qa)} />
+              <PipelineStage label="Video" value={`${videos.length} available`} />
+              <PipelineStage label="Pack" value={`${manager?.inventory?.packs || 0} ready`} />
+            </div>
+
+            {manager?.blockers?.length ? (
+              <div style={{ marginTop: 12, padding: 10, borderRadius: 8, background: 'var(--red-dim)', color: 'var(--red)', fontSize: 12 }}>
+                {manager.blockers[0].task}: {manager.blockers[0].error || manager.blockers[0].kind || 'Blocked'}
+              </div>
+            ) : null}
           </section>
         )}
 
-        {/* Shoots — dense grid, filterable */}
+        <section className="panel" style={{ marginBottom: 18 }}>
+          <div className="section-header">
+            <div>
+              <div className="eyebrow">Pipeline board</div>
+              <h3 className="section-title">Per-shoot QA state</h3>
+            </div>
+            <span className="muted-sm">{manager?.pipeline?.length || 0} tracked shoots</span>
+          </div>
+
+          {!manager?.pipeline?.length ? (
+            <div className="muted-md" style={{ padding: '18px 0' }}>No manager pipeline data for this persona yet.</div>
+          ) : (
+            <div style={{ display: 'grid', gap: 8 }}>
+              {manager.pipeline.slice(0, 8).map(p => {
+                const st = p.stages || {}
+                const total = Number(st.images_total || p.shots.length || 0)
+                const approved = Number(st.images_approved || p.shots.filter(s => s.status === 'APPROVED').length)
+                const failed = Number(st.images_failed || p.shots.filter(s => s.status === 'FAILED').length)
+                const open = expandedShoot === p.shoot_id
+                return (
+                  <div key={p.shoot_id} style={{ border: '1px solid var(--border)', borderRadius: 9, overflow: 'hidden' }}>
+                    <button
+                      onClick={() => setExpandedShoot(open ? null : p.shoot_id)}
+                      style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 12, padding: '11px 12px', textAlign: 'left', background: 'var(--bg-card)' }}
+                    >
+                      <span style={{ fontWeight: 700 }}>Shoot {p.shoot_id.slice(0, 8)}</span>
+                      <span className="muted-sm">{approved}/{total} approved</span>
+                      {failed > 0 && <span style={{ color: 'var(--red)', fontSize: 12 }}>{failed} failed</span>}
+                      <span style={{ marginLeft: 'auto', color: 'var(--text-muted)' }}>{open ? '▴' : '▾'}</span>
+                    </button>
+                    {open && (
+                      <div style={{ padding: '4px 12px 10px' }}>
+                        {p.shots.map(s => (
+                          <div key={s.shot_id} style={{ display: 'grid', gridTemplateColumns: '70px 1fr auto', gap: 8, padding: '7px 0', borderBottom: '1px solid var(--border)', fontSize: 12 }}>
+                            <span className="muted-sm">#{s.number}</span>
+                            <span>{s.type}</span>
+                            <span style={{ color: s.status === 'APPROVED' ? 'var(--green)' : s.status === 'FAILED' ? 'var(--red)' : 'var(--amber)' }}>
+                              {s.status}{s.qa ? ` · QA ${s.qa}` : ''}{s.retries ? ` · retry ${s.retries}` : ''}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </section>
+
         <section style={{ marginBottom: 24 }}>
           <div className="section-header">
-            <h3 className="section-title">
-              Shoots
-              <span className="count-badge" style={{ marginLeft: 8 }}>{filteredShoots.length}</span>
-            </h3>
+            <div>
+              <div className="eyebrow">Media library</div>
+              <h3 className="section-title">Shoots</h3>
+            </div>
             <div style={{ display: 'flex', gap: 6 }}>
               {(['all', 'completed', 'failed', 'draft'] as const).map(f => (
                 <button
                   key={f}
                   onClick={() => setStatusFilter(f)}
                   style={{
-                    padding: '4px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer',
+                    padding: '5px 11px',
+                    borderRadius: 6,
+                    fontSize: 12,
                     border: `1px solid ${statusFilter === f ? 'var(--green)' : 'var(--border)'}`,
-                    background: statusFilter === f ? 'rgba(217,251,113,0.1)' : 'transparent',
+                    background: statusFilter === f ? 'var(--green-dim)' : 'transparent',
                     color: statusFilter === f ? 'var(--green)' : 'var(--text-muted)',
                     textTransform: 'capitalize',
                   }}
-                >
-                  {f}
-                </button>
+                >{f}</button>
               ))}
             </div>
           </div>
+
           {loading ? (
             <p className="muted-md">Loading production data…</p>
           ) : filteredShoots.length === 0 ? (
-            <div style={{ textAlign: 'center', padding: '48px 0', color: 'var(--text-muted)' }}>
-              <p style={{ fontSize: 15, marginBottom: 8 }}>No {statusFilter !== 'all' ? statusFilter + ' ' : ''}shoots</p>
-              <p style={{ fontSize: 13 }}>Use Auto-Produce above or create a shoot from a persona.</p>
+            <div className="panel" style={{ textAlign: 'center', padding: 36 }}>
+              <div className="muted-md">No {statusFilter !== 'all' ? statusFilter + ' ' : ''}shoots for {selectedPersona?.name || 'this persona'}.</div>
             </div>
           ) : (
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 10 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(175px, 1fr))', gap: 10 }}>
               {filteredShoots.map(shoot => {
                 const imgs = (shoot.generated_images || []).filter(k => /^storage\/shoots\/[0-9a-f]{8}\//.test(k))
                 const cover = imgs[0]
@@ -286,37 +466,17 @@ export default function ProductionPage() {
                     className="panel"
                     style={{ padding: 0, overflow: 'hidden', cursor: coverUrl ? 'pointer' : 'default' }}
                     onClick={() => coverUrl && setLightbox(coverUrl)}
-                    title={coverUrl ? `${shoot.name} — click to view` : shoot.name}
                   >
-                    <div style={{
-                      width: '100%', aspectRatio: '3/4', background: 'var(--bg-card)',
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      color: 'var(--text-muted)', position: 'relative', overflow: 'hidden',
-                    }}>
-                      {coverUrl ? (
-                        <img src={coverUrl} alt="" loading="lazy" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                      ) : (
-                        <span>{Icons.image}</span>
-                      )}
-                      {imgs.length > 1 && (
-                        <span style={{
-                          position: 'absolute', bottom: 6, right: 6, background: 'rgba(0,0,0,0.7)',
-                          color: '#fff', fontSize: 11, padding: '2px 7px', borderRadius: 10,
-                        }}>{imgs.length}</span>
-                      )}
-                      {shoot.status?.toUpperCase() !== 'COMPLETED' && (
-                        <span style={{
-                          position: 'absolute', top: 6, left: 6, background: 'rgba(0,0,0,0.7)',
-                          color: shoot.status?.toUpperCase() === 'FAILED' ? '#f87171' : '#fbbf24', fontSize: 10,
-                          padding: '2px 7px', borderRadius: 10, textTransform: 'uppercase',
-                        }}>{shoot.status}</span>
-                      )}
+                    <div style={{ aspectRatio: '3/4', background: 'var(--bg-card)', position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
+                      {coverUrl ? <img src={coverUrl} alt="" loading="lazy" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : <span>{Icons.image}</span>}
+                      <span style={{ position: 'absolute', left: 6, top: 6, padding: '2px 7px', borderRadius: 999, background: 'rgba(0,0,0,.72)', fontSize: 10, color: shoot.status?.toLowerCase() === 'failed' ? '#f87171' : '#fff' }}>
+                        {shoot.status}
+                      </span>
+                      {imgs.length > 0 && <span style={{ position: 'absolute', right: 6, bottom: 6, padding: '2px 7px', borderRadius: 999, background: 'rgba(0,0,0,.72)', fontSize: 10 }}>{imgs.length} imgs</span>}
                     </div>
-                    <div style={{ padding: '8px 10px' }}>
-                      <div style={{ fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                        {shoot.name}
-                      </div>
-                      <div className="muted-sm" style={{ fontSize: 11 }}>{shoot.persona_name}</div>
+                    <div style={{ padding: 9 }}>
+                      <div style={{ fontWeight: 700, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{shoot.name}</div>
+                      <div className="muted-sm">{shoot.theme || selectedPersona?.name}</div>
                     </div>
                   </article>
                 )
@@ -325,31 +485,21 @@ export default function ProductionPage() {
           )}
         </section>
 
-        {/* Videos */}
         {videos.length > 0 && (
           <section style={{ marginBottom: 24 }}>
             <div className="section-header">
-              <h3 className="section-title">Videos ({videos.length})</h3>
+              <div>
+                <div className="eyebrow">Video inventory</div>
+                <h3 className="section-title">Videos ({videos.length})</h3>
+              </div>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 10 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 10 }}>
               {videos.map(v => (
                 <article key={v.id} className="panel" style={{ padding: 0, overflow: 'hidden' }}>
                   {v.video_url ? (
-                    <video
-                      src={v.video_url}
-                      controls
-                      muted
-                      preload="metadata"
-                      style={{ width: '100%', aspectRatio: '9/16', objectFit: 'cover', background: '#000' }}
-                    />
+                    <video src={v.video_url} controls muted preload="metadata" style={{ width: '100%', aspectRatio: '9/16', objectFit: 'cover', background: '#000' }} />
                   ) : (
-                    <div style={{
-                      width: '100%', aspectRatio: '9/16', background: 'var(--bg-card)',
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      color: 'var(--text-muted)',
-                    }}>
-                      <span>{Icons.activity}</span>
-                    </div>
+                    <div style={{ width: '100%', aspectRatio: '9/16', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg-card)' }}>{Icons.activity}</div>
                   )}
                 </article>
               ))}
